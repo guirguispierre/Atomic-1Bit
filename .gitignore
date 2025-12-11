@@ -1,0 +1,19 @@
+# Binaries
+*.so
+*.dylib
+*.dll
+*.o
+*.a
+runner
+atomic_model.bin
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+
+# OS
+.DS_Store
