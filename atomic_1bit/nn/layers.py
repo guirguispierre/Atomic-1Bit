@@ -1,35 +1,48 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
 import sys
 import os
 
-# Import our wrapper
+# Import our wrapper (still useful for verification if needed, but not used in training forward)
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", "python"))
 from wrapper import ternary_matmul
+
+def activation_quant(x):
+    """
+    Quantize activation to INT8 using AbsMax scaling with STE.
+    """
+    scale = 127.0 / x.abs().max(dim=-1, keepdim=True)[0].clamp(min=1e-5)
+    y = (x * scale).round().clamp(-127, 127)
+    # STE: detach y, but backward passes gradients to x
+    y_ste = (y - x * scale).detach() + x * scale
+    return y_ste, scale
+
+def weight_quant(w):
+    """
+    Quantize weights to {-1, 0, 1} using Mean scaling with STE.
+    """
+    scale = 1.0 / w.abs().mean().clamp(min=1e-5)
+    y = (w * scale).round().clamp(-1, 1)
+    y_ste = (y - w * scale).detach() + w * scale
+    return y_ste, scale
 
 class BitLinear(nn.Module):
     def __init__(self, in_features, out_features, bias=False):
         """
         BitNet b1.58 Linear Layer.
-        
-        Args:
-            in_features: Input dimension
-            out_features: Output dimension
-            bias: If True, adds a learnable bias. (BitNet usually no bias, but we support for compat)
+        Now supports Training via Straight-Through Estimator (STE).
         """
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
         
-        # Weights: INT8 {-1, 0, 1}
-        # We store them as standard torch.int8 parameters.
-        # Random initialization for demo: Map 0->-1, 1->0, 2->1
-        raw_w = torch.randint(0, 3, (in_features, out_features), dtype=torch.int8)
-        self.weight = nn.Parameter(raw_w - 1, requires_grad=False)
+        # Latent Float Weights (Out, In) - Standard PyTorch shape
+        self.weight = nn.Parameter(torch.randn(out_features, in_features))
         
         if bias:
-            self.bias = nn.Parameter(torch.zeros(out_features), requires_grad=False)
+            self.bias = nn.Parameter(torch.zeros(out_features))
         else:
             self.register_parameter('bias', None)
             
@@ -37,63 +50,47 @@ class BitLinear(nn.Module):
 
     def forward(self, x):
         """
-        Forward pass with quantization and C++ Kernel.
-        
-        x: Float Tensor (Batch, In_Features)
+        Forward pass with On-the-fly Quantization (STE).
         """
-        # 1. RMSNorm (Standard in BitNet)
-        # x_norm = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
-        # But wait, usually RMSNorm is a separate layer usually before the Linear. 
-        # But the prompt requested: "Include a simple RMSNorm before quantization"
-        
-        # RMSNorm
-        x_f32 = x.float() # Ensure float
+        # 1. RMSNorm
+        x_f32 = x.float()
         rms = torch.sqrt(torch.mean(x_f32 ** 2, dim=-1, keepdim=True) + self.eps)
         x_norm = x_f32 / rms
         
-        # 2. Quantization (AbsMax to INT8)
-        # We need to map range to -127..127
-        # Scale factor
-        # s = 127 / max(|x|)
-        max_val = x_norm.abs().max(dim=-1, keepdim=True)[0]
-        # Avoid div by zero
-        max_val = torch.clamp(max_val, min=1e-5) 
+        # 2. Quantize Activation
+        # x_q_ste is effectively (x_int8 / scale_x) * scale_x ... wait.
+        # activation_quant returns `y_ste` which is close to `x * scale` in value (approx int8 range).
+        # We want the input to F.linear to be the "Simulated Float" version or the "Int" version?
+        # F.linear(input, weight) -> input * weight^T.
+        # If we use quantized values:
+        # y = linear(x_quant_int, w_quant_int)
+        # Result y is int32-like (large).
+        # Then we dequantize: y / (scale_x * scale_w).
         
-        scale = 127.0 / max_val
-        x_quant = torch.clamp(torch.round(x_norm * scale), -127, 127).to(torch.int8)
+        x_quant_ste, scale_x = activation_quant(x_norm)
         
-        # 3. Execution (The Magic Kernel)
-        # Need to move to CPU numpy for our kernel
-        # This is where we pay the "Python Tax" currently, but it proves the architecture.
-        x_np = x_quant.cpu().numpy()
-        w_np = self.weight.cpu().numpy() # This is already int8
+        # 3. Quantize Weights
+        w_quant_ste, scale_w = weight_quant(self.weight)
         
-        # Handle Multi-dimensional input (Batch, Seq, Dim) -> (Batch*Seq, Dim)
-        original_shape = x_np.shape
-        if len(original_shape) > 2:
-            x_flat = x_np.reshape(-1, original_shape[-1])
-        else:
-            x_flat = x_np
-            
-        # Run Kernel
-        # shape: (M, Out)
-        y_int32 = ternary_matmul(x_flat, w_np)
+        # 4. Linear Operation
+        # We use the scaled versions (values ~127 and ~1) so the matrix mul results are large
+        # but the gradients are correct due to STE logic in the helper functions.
+        # Wait, `activation_quant` returns `(y - x*s).detach() + x*s`.
+        # So it returns values in range [-127, 127] (roughly).
+        # `weight_quant` returns values in range [-1, 1] (roughly).
         
-        # Reshape back if needed
-        if len(original_shape) > 2:
-            y_int32 = y_int32.reshape(*original_shape[:-1], -1)
+        # If we pass these to F.linear, we compute Transpose(w) * x.
+        y = F.linear(x_quant_ste, w_quant_ste)
         
-        # 4. Dequantization
-        # y_float = y_int32 / scale
-        # We need to convert back to tensor
-        y_tensor = torch.from_numpy(y_int32).float().to(x.device)
+        # 5. Dequantize
+        # y is approx (x * s_x) * (w * s_w).
+        # We want x * w.
+        # So y_out = y / (s_x * s_w).
         
-        # Rescale
-        # Note: scale has shape (Batch, 1) or (Batch, Seq, 1). 
-        # y_tensor (Batch, Seq, Out) / scale (Batch, Seq, 1) -> Broadcasting
-        y_out = y_tensor / scale.cpu()
+        y_out = y / (scale_x * scale_w)
         
         if self.bias is not None:
             y_out += self.bias
             
         return y_out
+

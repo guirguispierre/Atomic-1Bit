@@ -5,7 +5,12 @@
 *.o
 *.a
 runner
+atomic_engine
 atomic_model.bin
+
+# Weights (Large Files)
+*.pt
+weights/
 
 # Python
 __pycache__/
