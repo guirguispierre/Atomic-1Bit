@@ -1,80 +1,67 @@
-import torch
-import argparse
 import sys
 import os
-
-# Add project root
+import argparse
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from atomic_1bit.model.gist import GistEncoder, GistConfig
-from atomic_1bit.model.transformer import AtomicConfig # For default dims
+import torch
+import numpy as np
+import atomic_1bit # Ensure package is importable if needed
+# Wait, the remote code imported:
+from atomic_1bit.model.transformer import AtomicTransformer, AtomicConfig
+
+# Defaults for the Instruct Model
+DIM = 256
+DEPTH = 8
+HEADS = 4
+VOCAB = 50257
+CTX = 256
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate Gist Vector (.gist) from text prompt")
-    parser.add_argument("--prompt", type=str, required=True, help="Personality prompting text")
-    parser.add_argument("--output", type=str, required=True, help="Output filename (e.g. coder.gist)")
-    parser.add_argument("--dim", type=int, default=256, help="Model Dimension")
-    parser.add_argument("--vocab_size", type=int, default=50257)
+    parser = argparse.ArgumentParser(description="Atomic-1Bit Personality Swapper (Gist Generator)")
+    parser.add_argument("--prompt", type=str, required=True, help="System prompt to encode (e.g. 'You are a coder')")
+    parser.add_argument("--output", type=str, default="personality.gist", help="Output .gist file")
+    parser.add_argument("--model_path", type=str, default="weights/instruct_final.pt", help="Path to trained model weights")
     
     args = parser.parse_args()
     
-    print(f"Generating Gist for: '{args.prompt}'")
+    print(f"Loading Model Config from {args.model_path}...")
     
-    # Init Encoder (Random weights? No, GistEncoder is distinct. 
-    # Wait, GistEncoder mimics EmbeddingBag. 
-    # If we want the *same* gist representation as training, we need the *trained* GistEncoder weights.
-    # But `AtomicTransformer` *contains* the embeddings used by GistEncoder (it shares token_emb usually? 
-    # In my implementation `GistEncoder` was standalone with its own EmbeddingBag?
-    # Let's check `atomic_1bit/model/gist.py`.
+    if torch.backends.mps.is_available(): device = "mps"
+    elif torch.cuda.is_available(): device = "cuda"
+    else: device = "cpu"
     
-    # If GistEncoder has its own weights, we must load the trained model checkpoint to get them!
-    # Otherwise we generate random vectors which is useless.
+    # Init Model
+    config = AtomicConfig(vocab_size=VOCAB, dim=DIM, depth=DEPTH, heads=HEADS, context_length=CTX)
+    model = AtomicTransformer(config).to(device)
     
-    # Re-checking implementation plan... 
-    # It says "Runs it through the GistEncoder".
-    # I need to load the trained model to get the correct embeddings.
-    
-    parser.add_argument("--checkpoint", type=str, default="weights/instruct_final.pt", help="Path to trained model checkpoint")
-    args = parser.parse_args() # Re-parse to get checkpoint
-    
-    # Load Main Model to extract Embeddings for Gist
-    # (Assuming GistEncoder uses the same embeddings or is saved in the checkpoint)
-    # Actually `GistEncoder` in `model/gist.py` has `self.emb = nn.EmbeddingBag(vocab_size, dim, mode='mean')`.
-    # It is a *separate* set of weights unless we tied them.
-    # In `AtomicTransformer`, `self.gist_encoder = GistEncoder(gist_config)`.
-    # So the weights ARE in the checkpoint under `gist_encoder.emb.weight`.
-    
-    if not os.path.exists(args.checkpoint):
-        print(f"Error: Checkpoint {args.checkpoint} not found. Cannot generate valid Gist.")
-        print("Please train the model first.")
-        # For testing, we might allow random, but for real usage, we need trained weights.
-        sys.exit(1)
+    # Load weights
+    if os.path.exists(args.model_path):
+        ckpt = torch.load(args.model_path, map_location=device)
+        if "model_state_dict" in ckpt:
+            model.load_state_dict(ckpt["model_state_dict"])
+        else:
+            model.load_state_dict(ckpt)
+    else:
+        print("Error: Model weights not found. Cannot encode Gist without trained GistEncoder.")
+        return
 
-    print(f"Loading weights from {args.checkpoint}...")
-    state_dict = torch.load(args.checkpoint, map_location="cpu")
-    
-    # Extract Gist Weights
-    # Key: "gist_encoder.emb.weight"
-    if "gist_encoder.emb.weight" not in state_dict:
-        print("Error: Checkpoint does not contain 'gist_encoder.emb.weight'. Is Gist enabled?")
-        sys.exit(1)
-        
-    gist_weights = state_dict["gist_encoder.emb.weight"]
-    
-    # Init Encoder
-    config = GistConfig(vocab_size=args.vocab_size, dim=args.dim)
-    encoder = GistEncoder(config)
-    encoder.emb.weight.data = gist_weights # Load weights
+    model.eval()
     
     # Encode
-    gist_vec = encoder.encode(args.prompt) # (1, Dim)
-    
-    # Save
-    print(f"Saving to {args.output}...")
-    with open(args.output, "wb") as f:
-        f.write(gist_vec.detach().numpy().astype("float32").tobytes())
+    print(f"Encoding Prompt: '{args.prompt}'")
+    with torch.no_grad():
+        # Encode Gist
+        # GistEncoder expects full text, returns (1, Dim)
+        # Using model.gist_encoder.encode which should be available
+        gist_vec = model.gist_encoder.encode(args.prompt) # (1, Dim)
         
-    print("Done.")
+    print(f"Gist Vector Shape: {gist_vec.shape}")
+    
+    # Save to file
+    gist_np = gist_vec.cpu().numpy().astype("float32")
+    gist_np.tofile(args.output)
+    
+    print(f"Saved to {args.output}")
 
 if __name__ == "__main__":
     main()

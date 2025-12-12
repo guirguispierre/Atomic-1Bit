@@ -131,9 +131,8 @@ if __name__ == "__main__":
     import os
 
     parser = argparse.ArgumentParser(description="Export Atomic-1Bit Model to C++ Binary")
-    parser.add_argument("--checkpoint", type=str, default=None, help="Path to PyTorch checkpoint (e.g. weights/final.pt)")
+    parser.add_argument("--model", type=str, default="weights/final.pt", help="Path to .pt checkpoint")
     parser.add_argument("--output", type=str, default="atomic_model.bin", help="Output binary file")
-    
     # Gist Options
     parser.add_argument("--prompt", type=str, default=None, help="System Gist Prompt (will compute gist vector from model's gist_encoder)")
     parser.add_argument("--gist_file", type=str, default=None, help="Path to .gist file (Raw Float32 Vector) - overrides --prompt")
@@ -144,10 +143,7 @@ if __name__ == "__main__":
     parser.add_argument("--heads", type=int, default=4)
     parser.add_argument("--context_len", type=int, default=128)
     parser.add_argument("--vocab_size", type=int, default=50257)
-
     args = parser.parse_args()
-
-    # 1. Initialize Model
     config = AtomicConfig(
         vocab_size=args.vocab_size, 
         dim=args.dim, 
