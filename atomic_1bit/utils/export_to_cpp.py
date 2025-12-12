@@ -21,26 +21,45 @@ def quantize_and_transpose_weight(w_f32):
     return w_q.t().cpu().numpy()
 
 
-def export_model(model: AtomicTransformer, filename: str, prompt: str = None):
-    print(f"Exporting model to {filename} (Gist: {prompt if prompt else 'None'})...")
+def export_model(model: AtomicTransformer, filename: str, prompt: str = None, gist_file: str = None):
+    print(f"Exporting model to {filename} (Gist Source: {'File: '+gist_file if gist_file else (prompt if prompt else 'None')})...")
     
     # Gist Vector
     has_gist = 0
     gist_vector = None
     
-    if prompt:
+    if gist_file:
+         print(f"  Loading Gist Vector from file: {gist_file}")
+         if not os.path.exists(gist_file):
+             print("Error: Gist file not found.")
+             # We shouldn't exit here inside a function maybe? Or just warn.
+             # Let's assume critical failure if gist missing but requested.
+             has_gist = 0
+         else:
+             import numpy as np
+             # Read raw float32 bytes
+             try:
+                 gist_vector_np = np.fromfile(gist_file, dtype=np.float32)
+                 if len(gist_vector_np) != model.config.dim:
+                     print(f"Error: Gist dimension mismatch. Expected {model.config.dim}, got {len(gist_vector_np)}")
+                 else:
+                     gist_vector = torch.tensor(gist_vector_np)
+                     has_gist = 1
+             except Exception as e:
+                 print(f"Error reading gist file: {e}")
+
+    elif prompt:
         has_gist = 1
         # Create minimal GistEncoder on the fly
-        gist_conf = GistConfig(vocab_size=model.config.vocab_size, dim=model.config.dim)
-        gist_enc = GistEncoder(gist_conf)
-        # In real usage, we'd load trained weights. Here we use random init for demo.
+        # NOTE: This uses RANDOM weights for the GistEncoder unless we loaded them.
+        # But `AtomicTransformer` usually contains `gist_encoder`.
+        # If we use `model.gist_encoder`, it has the correct weights!
         
-        # Tokenize (Dummy: map chars to int or just random for demo)
-        # Length of prompt
-        dummy_ids = torch.tensor([[hash(w) % model.config.vocab_size for w in prompt.split()]], dtype=torch.long)
-        
+        print(f"  Computing Gist for prompt: '{prompt}'")
+        model.eval()
         with torch.no_grad():
-            gist_vector = gist_enc(dummy_ids).squeeze(0) # (Dim,)
+            # Assumes model.gist_encoder exists and is trained
+            gist_vector = model.gist_encoder.encode(prompt).squeeze(0) # (Dim,)
             
     with open(filename, "wb") as f:
         # 1. Header
@@ -51,8 +70,8 @@ def export_model(model: AtomicTransformer, filename: str, prompt: str = None):
         
         # 1.5 Write Gist Vector if present
         if has_gist == 1:
-            print(f"  Writing Gist Vector for prompt: '{prompt}'")
-            f.write(gist_vector.detach().numpy().astype('float32').tobytes())
+            if gist_vector is not None:
+                f.write(gist_vector.detach().cpu().numpy().astype('float32').tobytes())
         
         # Helper to write tensor
         def write_tensor(name, tensor, dtype='f', needs_quant=False):
@@ -114,11 +133,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Export Atomic-1Bit Model to C++ Binary")
     parser.add_argument("--checkpoint", type=str, default=None, help="Path to PyTorch checkpoint (e.g. weights/final.pt)")
     parser.add_argument("--output", type=str, default="atomic_model.bin", help="Output binary file")
-    parser.add_argument("--prompt", type=str, default="Once upon a time", help="System Gist Prompt")
     
-    # Model Architecture (Defaults match training/train.py)
+    # Gist Options
+    parser.add_argument("--prompt", type=str, default=None, help="System Gist Prompt (will compute gist vector from model's gist_encoder)")
+    parser.add_argument("--gist_file", type=str, default=None, help="Path to .gist file (Raw Float32 Vector) - overrides --prompt")
+    
+    # Model Config (Must match training!)
     parser.add_argument("--dim", type=int, default=256)
-    parser.add_argument("--depth", type=int, default=4)
+    parser.add_argument("--depth", type=int, default=8) # Updated default for instruct
     parser.add_argument("--heads", type=int, default=4)
     parser.add_argument("--context_len", type=int, default=128)
     parser.add_argument("--vocab_size", type=int, default=50257)
@@ -142,14 +164,13 @@ if __name__ == "__main__":
             print(f"Loading checkpoint from {args.checkpoint}...")
             # map_location='cpu' to be safe
             state_dict = torch.load(args.checkpoint, map_location="cpu")
-            # If state dict has 'module.' prefix (from DataParallel), strip it? 
-            # Usually not needed for single GPU training but good practice.
-            # model.load_state_dict(state_dict)
-            
-            # Strict=False might be needed if there are extra buffers? 
-            # Our BitLinear has no extra buffers, just weight/bias.
+            # Strict=False if gist encoder missing in old ckpt
             try:
-                model.load_state_dict(state_dict)
+                if "model_state_dict" in state_dict:
+                    print("  (Detected Checkpoint Wrapper - unwrapping)")
+                    state_dict = state_dict["model_state_dict"]
+                
+                model.load_state_dict(state_dict, strict=False) 
                 print("Checkpoint loaded successfully.")
             except Exception as e:
                 print(f"Error loading checkpoint: {e}")
@@ -160,5 +181,4 @@ if __name__ == "__main__":
         print("No checkpoint specified. Using random weights.")
 
     # 3. Export
-    export_model(model, args.output, prompt=args.prompt)
-
+    export_model(model, args.output, prompt=args.prompt, gist_file=args.gist_file)
