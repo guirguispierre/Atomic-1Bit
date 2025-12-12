@@ -1,6 +1,9 @@
 import sys
 import os
 import glob
+import json
+from collections import Counter
+
 # Add project root to path
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", ".."))
 
@@ -12,24 +15,104 @@ import numpy as np
 from datasets import load_dataset
 from atomic_1bit.model.transformer import AtomicTransformer, AtomicConfig
 
-# --- POCKET CONFIG (For 8MB RAM Cardputer) ---
+# --- POCKET CONFIG (Upgraded) ---
+# Dim 320, Depth 8 -> ~10M Params.
+# Fits in 8MB PSRAM (Weights ~4MB + KV Cache ~2.5MB + Buffer).
 BATCH_SIZE = 32 
 CONTEXT_LEN = 128 
-DIM = 256
-DEPTH = 6  
-HEADS = 4
-VOCAB_SIZE = 4096 # Reduced from 50257
-LR = 1e-3
+DIM = 320
+DEPTH = 8 
+HEADS = 5 # 320 / 5 = 64 head dim (Standard)
+VOCAB_SIZE = 4096 
+UNK_ID = VOCAB_SIZE - 1 
+LR = 6e-4 # Slightly lower starting LR for stability with scheduler
 
-# Dataset customized for Pocket
 class PocketAlpacaDataset:
-    def __init__(self, split="train", context_length=128):
-        print(f"Loading Alpaca (Pocket Mode - Modulo {VOCAB_SIZE})...")
-        self.dataset = load_dataset("yahma/alpaca-cleaned", split=split)
+    def __init__(self, split="train", context_length=128, vocab_file="weights/pocket_vocab_map.json"):
+        print(f"Loading Alpaca Cleaned ({split})...")
+        raw_dataset = load_dataset("yahma/alpaca-cleaned", split=split)
         self.enc = tiktoken.get_encoding("gpt2")
         self.context_length = context_length
-        print(f"Loaded {len(self.dataset)} samples.")
+        self.vocab_file = vocab_file
         
+        # --- 1. FILTERING ---
+        print(f"Filtering dataset (Max Tokens: {context_length})...")
+        self.dataset = []
+        
+        # We filter by encoding first. This might take a moment but ensures quality.
+        kept_count = 0
+        dropped_count = 0
+        
+        # Optimize: Pre-calculate token counts for all samples?
+        # HuggingFace filter is faster.
+        
+        def filter_fn(sample):
+            text = self.format_prompt(sample)
+            # Rough check by char length first? No, strict token check.
+            ids = self.enc.encode(text)
+            # Add +1 for EOT
+            return len(ids) + 1 <= context_length
+            
+        # Using .filter() from datasets (multi-threaded usually)
+        self.dataset = raw_dataset.filter(filter_fn)
+            
+        print(f"Filtered dataset from {len(raw_dataset)} to {len(self.dataset)} samples.")
+        
+        self.token_map = {}   # GPT2_ID -> POCKET_ID
+        self.reverse_map = {} # POCKET_ID -> GPT2_ID
+        
+        self._init_vocab()
+        
+    def _init_vocab(self):
+        # 1. Try Load
+        if os.path.exists(self.vocab_file):
+            print(f"Loading vocab map from {self.vocab_file}...")
+            with open(self.vocab_file, 'r') as f:
+                data = json.load(f)
+                self.token_map = {int(k): v for k, v in data["token_map"].items()}
+                self.reverse_map = {int(k): v for k, v in data["reverse_map"].items()}
+            print(f"Loaded {len(self.token_map)} mapped tokens.")
+            return
+
+        # 2. Build Frequency Map (On Filtered Data)
+        print("Building Frequency-Based Vocab (Scanning first 10k filtered samples)...")
+        counter = Counter()
+        
+        scan_limit = min(10000, len(self.dataset))
+        for i in range(scan_limit):
+            row = self.dataset[i]
+            text = self.format_prompt(row)
+            ids = self.enc.encode(text)
+            counter.update(ids)
+            
+        eot = self.enc.eot_token
+        
+        # Reserve UNK, ensure EOT
+        most_common = counter.most_common(VOCAB_SIZE - 2)
+        
+        new_id = 0
+        valid_gpt_ids = [k for k, v in most_common]
+        if eot not in valid_gpt_ids:
+            valid_gpt_ids.append(eot)
+            
+        valid_gpt_ids = valid_gpt_ids[:VOCAB_SIZE - 1]
+        
+        for gpt_id in valid_gpt_ids:
+            self.token_map[gpt_id] = new_id
+            self.reverse_map[new_id] = gpt_id
+            new_id += 1
+            
+        self.unk_token = UNK_ID
+        
+        print(f"Saving vocab map to {self.vocab_file}...")
+        save_data = {
+            "token_map": self.token_map,
+            "reverse_map": self.reverse_map
+        }
+        os.makedirs(os.path.dirname(self.vocab_file), exist_ok=True)
+        with open(self.vocab_file, 'w') as f:
+            json.dump(save_data, f)
+            
     def format_prompt(self, sample):
         text = f"### Instruction: {sample['instruction']}\n"
         if sample.get("input", ""):
@@ -49,75 +132,59 @@ class PocketAlpacaDataset:
             text = self.format_prompt(row)
             
             # Encode
-            ids = self.enc.encode(text)
+            gpt_ids = self.enc.encode(text)
+            gpt_ids.append(self.enc.eot_token)
             
-            # --- POCKET HACK: Modulo Token IDs ---
-            # Restricted vocab for embedded device
-            ids = [t % VOCAB_SIZE for t in ids]
+            # REMAP
+            pocket_ids = [self.token_map.get(gid, UNK_ID) for gid in gpt_ids]
             
-            # Add EOT (mapped to 0 or VOCAB_SIZE-1? Let's use 0)
-            eot = self.enc.eot_token % VOCAB_SIZE
-            ids.append(eot) 
+            # Pad
+            if len(pocket_ids) < self.context_length + 1:
+                eot_mapped = self.token_map.get(self.enc.eot_token, UNK_ID)
+                pocket_ids = pocket_ids + [eot_mapped] * (self.context_length + 1 - len(pocket_ids))
             
-            # Handling length
-            if len(ids) < self.context_length + 1:
-                ids = ids + [eot] * (self.context_length + 1 - len(ids))
-            elif len(ids) > self.context_length + 1:
-                ids = ids[:self.context_length + 1]
-                
-            batch_input_ids.append(ids[:-1])
-            batch_targets.append(ids[1:])
+            # No need to truncate, we filtered!
+            
+            batch_input_ids.append(pocket_ids[:-1])
+            batch_targets.append(pocket_ids[1:])
             
         x = torch.tensor(batch_input_ids, dtype=torch.long)
         y = torch.tensor(batch_targets, dtype=torch.long)
         return x, y
 
-def generate_demo_pocket(model, enc, instruction="Count to 5."):
+def generate_demo_pocket(model, ds, instruction="Count to 5."):
     model.eval()
     device = next(model.parameters()).device
     
     prompt = f"### Instruction: {instruction}\n### Response:"
-    ids = enc.encode(prompt)
-    # Apply Modulo
-    ids = [t % VOCAB_SIZE for t in ids]
+    gpt_ids = ds.enc.encode(prompt)
     
+    ids = [ds.token_map.get(gid, UNK_ID) for gid in gpt_ids]
     x = torch.tensor([ids], dtype=torch.long).to(device)
     
-    print(f"\n[POCKET DEMO INPUT] {instruction}")
-    print("[POCKET DEMO OUTPUT] ", end="", flush=True)
+    print(f"\n[POCKET INPUT] {instruction}")
+    print("[POCKET OUTPUT] ", end="", flush=True)
     
-    eot = enc.eot_token % VOCAB_SIZE
+    eot_mapped = ds.token_map.get(ds.enc.eot_token, UNK_ID)
     
-    for _ in range(50):
+    for _ in range(60):
         if x.size(1) >= CONTEXT_LEN: break
         with torch.no_grad():
             logits = model(x)
             last_logits = logits[:, -1, :]
             probs = F.softmax(last_logits, dim=-1)
             next_token = torch.multinomial(probs, 1)
+            pocket_id = next_token.item()
             
-            tok_id = next_token.item()
-            
-            # Decode is tricky because we lost info with modulo.
-            # We can't really decoded nicely back to text unless we had a specific reduced vocab map.
-            # But 'tiktoken.decode' expects full IDs.
-            # We will just print the ID, or try to decode as-is (might be wrong word, but gives an idea).
-            # ACTUALLY: Since we trained on `id % 4096`, the model output `id`. 
-            # This `id` corresponds to `original_id % 4096`. 
-            # There are many original_ids that map to this. We decode using the original_id = id
-            # (assuming the most frequent ones are in 0-4096 range effectively).
-            
+            gpt_id = ds.reverse_map.get(pocket_id, ds.enc.eot_token)
             try:
-                word = enc.decode([tok_id]) 
-                # Note: This might produce garbage if ID 5 maps to "apple" but we mean "bear" (5030%4096=5 ?).
-                # But GPT2 tokenizer is byte-level BPE, low IDs are frequent?
-                # Actually GPT2 low IDs are bytes/chars.
+                word = ds.enc.decode([gpt_id])
                 print(word, end="", flush=True)
             except:
-                print("?", end="", flush=True)
+                pass
             
             x = torch.cat([x, next_token], dim=1)
-            if tok_id == eot: break
+            if pocket_id == eot_mapped: break
             
     print("\n")
     model.train()
@@ -126,13 +193,14 @@ def train():
     weights_dir = "weights"
     os.makedirs(weights_dir, exist_ok=True)
     
-    print("--- Atomic-1Bit POCKET Training (Vocab=4096) ---")
+    print(f"--- Atomic-1Bit POCKET UPSCALED (Vocab={VOCAB_SIZE}, Dim={DIM}) ---")
     
     if torch.backends.mps.is_available(): device = "mps"
     elif torch.cuda.is_available(): device = "cuda"
     else: device = "cpu"
     print(f"Device: {device}")
     
+    # Init Dataset (Filtering happens here)
     ds = PocketAlpacaDataset(context_length=CONTEXT_LEN)
     
     config = AtomicConfig(vocab_size=VOCAB_SIZE, dim=DIM, depth=DEPTH, heads=HEADS, context_length=CONTEXT_LEN)
@@ -140,6 +208,8 @@ def train():
     
     start_step = 0
     ckpt_path = os.path.join(weights_dir, "pocket_final.pt")
+    
+    optimizer = optim.AdamW(model.parameters(), lr=LR)
     
     if os.path.exists(ckpt_path):
         print(f">> Found checkpoint: {ckpt_path}")
@@ -149,18 +219,25 @@ def train():
             if "step" in checkpoint:
                 start_step = checkpoint["step"]
                 print(f"   Resuming from STEP {start_step}")
+            if "optimizer_state_dict" in checkpoint:
+                try:
+                    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+                except:
+                    print("   Warning: Could not load optimizer state (structure mismatch?)")
         else:
+            print("   Warning: Legacy checkpoint, starting step 0")
             model.load_state_dict(checkpoint)
     else:
         print(">> Starting Fresh POCKET Model")
 
-    optimizer = optim.AdamW(model.parameters(), lr=LR)
-    
     print(f"Params: {sum(p.numel() for p in model.parameters())/1e6:.2f}M")
     
     steps_input = input(f"Current Step: {start_step}. How many ADDITIONAL steps to train? (Def: 5000): ")
     additional_steps = int(steps_input) if steps_input.strip() else 5000
     total_steps_target = start_step + additional_steps
+    
+    # Scheduler
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=additional_steps, eta_min=1e-5)
     
     print(f"Training from {start_step} to {total_steps_target}...")
     
@@ -174,12 +251,13 @@ def train():
             loss = F.cross_entropy(logits.view(-1, VOCAB_SIZE), y.view(-1))
             loss.backward()
             optimizer.step()
+            scheduler.step()
             
             if step % 10 == 0:
-                print(f"Step {step}/{total_steps_target} | Loss: {loss.item():.4f}")
+                print(f"Step {step}/{total_steps_target} | Loss: {loss.item():.4f} | LR: {scheduler.get_last_lr()[0]:.2e}")
                 
             if step % 500 == 0:
-                generate_demo_pocket(model, ds.enc, "What is AI?")
+                generate_demo_pocket(model, ds, "Hi")
                 
             if step > 0 and step % 1000 == 0:
                 save_dict = {
