@@ -9,7 +9,7 @@ plt.rcParams.update({'font.size': 12, 'axes.facecolor': '#1e1e1e', 'savefig.face
 # Data (Manual entry from observed results)
 metrics = {
     "Model Size (MB)": {"FP16": 5.3, "Atomic-1Bit": 2.0},
-    "Inference Speed (TPS)": {"FP16": 555, "Atomic Py": 125, "Atomic C++": 60} 
+    "Inference Speed (TPS)": {"FP16": 826, "Atomic Py": 136, "Atomic C++": 56} 
 }
 
 def save_plot(name):

@@ -15,13 +15,15 @@ We successfully trained and deployed an Atomic-1Bit Transformer on a subset of T
 
 ### Performance Comparison (Apple M-series CPU)
 
+**Context**: Sequence Length=64, Gen Tokens=100, Batch Size=1.
+
 | Metric | FP16 Baseline | Atomic-1Bit | Delta |
 | :--- | :--- | :--- | :--- |
 | **Model Size** | 5.3 MB | **2.0 MB** | **-62%** |
 | **Parameters** | 1.33 M | 1.33 M | 0% |
 | **Precision** | Float16 | Ternary {-1, 0, 1} | - |
-| **Speed (Python)** | ~555 TPS | ~125 TPS | -77% (Unoptimized) |
-| **Speed (C++ Bare)**| N/A | ~60 TPS | Portable Runtime |
+| **Speed (Python)** | ~826 TPS | ~136 TPS | -83% (Unoptimized) |
+| **Speed (C++ Bare)**| N/A | ~56 TPS | Portable Runtime |
 
 **Visual Summary**
 
