@@ -132,10 +132,9 @@ inline bool load_model(const string &filename, AtomicModel &model) {
     return false;
 
   // Header
-  uint32_t magic;
-  f.read((char *)&magic, 4);
-  if (magic != 0xATOM1C)
-    return false;
+  // Magic number check removed as current exporter does not write one
+  // uint32_t magic;
+  // f.read((char *)&magic, 4);
 
   f.read((char *)&model.config.vocab_size, 4);
   f.read((char *)&model.config.dim, 4);
@@ -229,9 +228,9 @@ inline void forward(AtomicModel &model, const vector<int> &tokens,
   for (int i = 0; i < input_len; ++i) {
     int token_id = tokens[i];
     float *x_ptr = &X[(t_offset + i) * dim];
-    float *tok_ptr = &model.token_emb.data[token_id * dim];
+    float *tok_ptr = &model.token_emb.data()[token_id * dim];
     // Safety: check token_id < vocab_size
-    float *pos_ptr = &model.pos_emb.data[i * dim];
+    float *pos_ptr = &model.pos_emb.data()[i * dim];
 
     for (int d = 0; d < dim; ++d) {
       x_ptr[d] = tok_ptr[d] + pos_ptr[d];

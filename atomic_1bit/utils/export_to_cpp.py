@@ -12,17 +12,17 @@ import torch
 
 def quantize_and_transpose_weight(w_f32):
     """
-    Takes float weights (Out, In), quantizes to {-1, 0, 1}, and transposes to (In, Out).
-    Returns int8 numpy array.
+    Takes float weights (Out, In), quantizes to {-1, 0, 1}.
+    Returns int8 numpy array (Out, In).
+    Note: Optimized Kernel expects (Out, In) layout for SIMD access.
     """
     scale = 1.0 / w_f32.abs().mean().clamp(min=1e-5)
     w_q = (w_f32 * scale).round().clamp(-1, 1).to(torch.int8)
-    # Transpose to (In, Out) for C++ kernel
-    return w_q.t().cpu().numpy()
+    return w_q.cpu().numpy()
 
 
 def export_model(model: AtomicTransformer, filename: str, prompt: str = None, gist_file: str = None):
-    print(f"Exporting model to {filename} (Gist Source: {'File: '+gist_file if gist_file else (prompt if prompt else 'None')})...")
+    print(f"Exporting model to {filename} (Gist: {prompt if prompt else 'None'})...")
     
     # Gist Vector
     has_gist = 0
@@ -133,16 +133,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Export Atomic-1Bit Model to C++ Binary")
     parser.add_argument("--model", type=str, default="weights/final.pt", help="Path to .pt checkpoint")
     parser.add_argument("--output", type=str, default="atomic_model.bin", help="Output binary file")
-    # Gist Options
-    parser.add_argument("--prompt", type=str, default=None, help="System Gist Prompt (will compute gist vector from model's gist_encoder)")
-    parser.add_argument("--gist_file", type=str, default=None, help="Path to .gist file (Raw Float32 Vector) - overrides --prompt")
-    
-    # Model Config (Must match training!)
-    parser.add_argument("--dim", type=int, default=256)
-    parser.add_argument("--depth", type=int, default=8) # Updated default for instruct
-    parser.add_argument("--heads", type=int, default=4)
-    parser.add_argument("--context_len", type=int, default=128)
-    parser.add_argument("--vocab_size", type=int, default=50257)
+<<<<<<< HEAD
+    parser.add_argument("--prompt", type=str, default=None, help="System Prompt to bake into Gist (Optional)")
+    parser.add_argument("--gist_file", type=str, default=None, help="Path to pre-computed .gist file (Overrides prompt)")
+    parser.add_argument("--dim", type=int, default=128, help="Model dimension")
+    parser.add_argument("--depth", type=int, default=4, help="Model depth")
+    parser.add_argument("--heads", type=int, default=4, help="Number of heads")
+    parser.add_argument("--context_len", type=int, default=64, help="Context length")
+    parser.add_argument("--vocab_size", type=int, default=2048, help="Vocab size")
     args = parser.parse_args()
     config = AtomicConfig(
         vocab_size=args.vocab_size, 
@@ -155,12 +153,17 @@ if __name__ == "__main__":
     print(f"Initialized Model: Dim={args.dim}, Depth={args.depth}, Heads={args.heads}")
 
     # 2. Load Checkpoint
-    if args.checkpoint:
-        if os.path.exists(args.checkpoint):
-            print(f"Loading checkpoint from {args.checkpoint}...")
+    if args.model:
+        if os.path.exists(args.model):
+            print(f"Loading checkpoint from {args.model}...")
             # map_location='cpu' to be safe
-            state_dict = torch.load(args.checkpoint, map_location="cpu")
-            # Strict=False if gist encoder missing in old ckpt
+            state_dict = torch.load(args.model, map_location="cpu")
+            # If state dict has 'module.' prefix (from DataParallel), strip it? 
+            # Usually not needed for single GPU training but good practice.
+            # model.load_state_dict(state_dict)
+            
+            # Strict=False might be needed if there are extra buffers? 
+            # Our BitLinear has no extra buffers, just weight/bias.
             try:
                 if "model_state_dict" in state_dict:
                     print("  (Detected Checkpoint Wrapper - unwrapping)")
@@ -172,9 +175,10 @@ if __name__ == "__main__":
                 print(f"Error loading checkpoint: {e}")
                 print("Continuing with random weights (WARNING)...")
         else:
-            print(f"Checkpoint {args.checkpoint} not found! Using random weights.")
+            print(f"Checkpoint {args.model} not found! Using random weights.")
     else:
         print("No checkpoint specified. Using random weights.")
 
     # 3. Export
     export_model(model, args.output, prompt=args.prompt, gist_file=args.gist_file)
+

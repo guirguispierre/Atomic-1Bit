@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -363,6 +364,9 @@ int main(int argc, char **argv) {
 
   cout << "Generating: ";
 
+  // ... (rest of code)
+
+  auto start_time = std::chrono::high_resolution_clock::now();
   int gen_len = 50;
 
   for (int step = 0; step < gen_len; ++step) {
@@ -385,7 +389,11 @@ int main(int argc, char **argv) {
     cout << best_token << " " << flush;
     context.push_back(best_token);
   }
+  auto end_time = std::chrono::high_resolution_clock::now();
+  std::chrono::duration<double> diff = end_time - start_time;
+  double tps = gen_len / diff.count();
   cout << endl << "Done." << endl;
+  cout << "TPS: " << tps << endl;
 
   return 0;
 }

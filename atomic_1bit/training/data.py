@@ -37,11 +37,14 @@ class TinyStoriesDataset:
         return x, y
 
 class AlpacaDataset:
-    def __init__(self, split="train", context_length=256):
+    def __init__(self, split="train", context_length=256, vocab_cap=None):
         print(f"Loading Alpaca Cleaned ({split})...")
         self.dataset = load_dataset("yahma/alpaca-cleaned", split=split)
         self.enc = tiktoken.get_encoding("gpt2")
         self.context_length = context_length
+        self.vocab_cap = vocab_cap
+        if vocab_cap:
+            print(f"   [Pocket Mode] Vocab Capped to {vocab_cap} (Modulo)")
         print(f"Loaded {len(self.dataset)} samples.")
         
     def format_prompt(self, sample):
@@ -64,7 +67,15 @@ class AlpacaDataset:
             
             # Encode
             ids = self.enc.encode(text)
+            
+            # Pocket Mode Modulo
+            if self.vocab_cap:
+                ids = [t % self.vocab_cap for t in ids]
+                
             ids.append(self.enc.eot_token)
+            # Re-apply modulo to EOT if needed (EOT usually 50256)
+            if self.vocab_cap:
+                ids[-1] = ids[-1] % self.vocab_cap
             
             # Handle Length
             if len(ids) < self.context_length + 1:
