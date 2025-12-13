@@ -4,113 +4,111 @@
 **Atomic-1Bit** is a bare-metal, ultra-lightweight inference engine for **BitNet b1.58** (1.58-bit ternary models).
 It proves that you don't need FP16 matrix multiplication to run modern AI. The core engine runs on **INT8 addition and subtraction** only.
 
+## 📊 Benchmarks & Results
+
+We successfully trained and deployed an Atomic-1Bit Transformer on a subset of TinyStories. The model was exported to a standalone C++ binary for bare-metal inference.
+
+### Key Achievements
+- **Ultra-Low Memory Footprint**: The quantised model (1.58-bit weights) occupies just **2.0 MB** on disk, compared to **5.3 MB** for an equivalent FP16 baseline (**-62%**).
+- **Portability**: The C++ runtime depends only on the standard library (STL) and compiles to a single, dependency-free executable.
+- **Integer-Only Operations**: The core `BitLinear` layer replaces expensive floating-point multiplications with integer additions.
+
+### Performance Comparison (Apple M-series CPU)
+
+| Metric | FP16 Baseline | Atomic-1Bit | Delta |
+| :--- | :--- | :--- | :--- |
+| **Model Size** | 5.3 MB | **2.0 MB** | **-62%** |
+| **Parameters** | 1.33 M | 1.33 M | 0% |
+| **Precision** | Float16 | Ternary {-1, 0, 1} | - |
+| **Speed (Python)** | ~555 TPS | ~125 TPS | -77% (Unoptimized) |
+| **Speed (C++ Bare)**| N/A | ~60 TPS | Portable Runtime |
+
+**Visual Summary**
+
+![Performance Chart](assets/chart_model_size.png)
+![Speed Chart](assets/chart_speed.png)
+![Text Samples](assets/text_samples_comparison.png)
+
+*Note: Benchmarks simulate 1-bit logic on standard CPUs. Dedicated hardware (FPGA/ASIC) would yield significantly higher speedups.*
+
+---
+
 ## 🚀 The Stack
-The project is divided into two stacks:
+The project is divided into three main components:
 
 ### 1. Research Stack (Python/PyTorch)
 Located in `atomic_1bit/`.
-- **Purpose**: Architecture design, training (`TinyStories`), and chat.
-- **Components**:
-    - `BitLinear`: Custom PyTorch layer with **Straight-Through Estimator (STE)** for training and C++ Kernel for inference.
-    - `AtomicTransformer`: GPT-style Decoder-only model.
-    - `GistEncoder`: "Thought Compression" module.
+- **Purpose**: Architecture design, training, and chat.
+- **Components**: `BitLinear`, `AtomicTransformer`, `GistEncoder`.
 
 ### 2. Bare Metal Stack (C++)
 Located in `embedded/`.
-- **Purpose**: Deployment on potatoes (Raspberry Pi, ESP32, Phones).
-- **Specs**:
-    - **Dependencies**: `None` (Standard C++ Library only).
-    - **Structure**: Header-only library (`atomic_lib.h`) + Runner (`atomic_runner.cpp`).
-    - **Input**: Custom binary format (`atomic_model.bin`).
+- **Purpose**: Deployment on constrained devices (Raspberry Pi, ESP32).
+- **Structure**: Header-only library (`atomic_lib.h`) + Runner (`atomic_runner.cpp`).
+
+### 3. Benchmarking Suite
+Located in `benchmarks/`.
+- **Purpose**: Reproducible performance evaluation against FP16 baselines.
 
 ---
 
 ## ⚡ Quick Start
 
 ### Prerequisites
-- Python 3.8+
-- PyTorch
+- Python 3.8+ (`pip install torch tiktoken datasets numpy matplotlib`)
 - GCC/G++
 
-### 1. Build the Core Kernel
-First, compile the shared library for the Python wrapper:
+### 1. Build Core (Optional)
 ```bash
 cd atomic_1bit/core
 make
 cd ../..
 ```
 
-### 2. Train the Model
-Train a fresh model on the "TinyStories" dataset (or a subset):
+### 2. Run Benchmarks
+To run the full benchmark suite (Training -> C++ Export -> Inference Test):
 ```bash
-# Interactive training script
+python benchmarks/run_suite.py
+```
+See [docs/benchmarking.md](docs/benchmarking.md) for detailed methodology.
+
+### 3. Interactive Training
+To train the full model interactively:
+```bash
 python3 atomic_1bit/training/train.py
 ```
-*Saves checkpoints to `weights/`.*
 
-### 3. Chat (Python)
-Talk to your trained model interactively (top-k sampling):
+### 4. Deployment (Embedded)
+Export your trained model to run on the C++ engine:
 ```bash
-python3 atomic_1bit/python/chat.py
-```
+# 1. Export
+python3 atomic_1bit/utils/export_to_cpp.py --model weights/pocket_final.pt --output embedded/atomic_model.bin --prompt "You are a helpful assistant."
 
----
-
-## 🛠️ Deployment (Embedded)
-
-To run on bare metal, we "freeze" the model and run it with the C++ engine.
-
-### Step 1: Export to Binary
-We also define a "System Prompt" (Gist) that gets compressed into a vector.
-```bash
-# Find latest checkpoint
-LATEST=$(ls -t weights/ckpt_*.pt | head -n1)
-
-# Export (Injecting System Gist: "Once upon a time")
-python3 atomic_1bit/utils/export_to_cpp.py --checkpoint "$LATEST" --output embedded/atomic_model.bin --prompt "Once upon a time"
-```
-
-### Step 2: Compile & Run C++ Engine
-The runner generates tokens using the C++ logic.
-```bash
+# 2. Compile & Run
 cd embedded
 g++ -O3 -std=c++17 atomic_runner.cpp -o atomic_engine
 ./atomic_engine
 ```
-*Output: A stream of Token IDs (e.g., `12 45 99 ...`).*
-
-### Step 3: Decode Output
-Since the embedded runner is minimal, use this script to read the story:
-```bash
-python3 atomic_1bit/utils/decode.py
-# Paste the numbers from Step 2
-```
 
 ---
 
-## 📱 ESP32 Porting Guide
-Want to run this on an Arduino/ESP32?
-Check out [embedded/ESP32_PORT_GUIDE.md](embedded/ESP32_PORT_GUIDE.md).
-
-Key steps:
-1. Copy `embedded/atomic_lib.h` to your Arduino project.
-2. Use an SD Card for model storage (28MB fits easily).
-3. Use the `load_model` and `forward` functions provided in the lib.
-
----
-
-## 🧠 "The Magic Kernel"
-The heart of Atomic-1Bit is `ternary_matmul`.
-Instead of `Multiplication`, we do:
+## 🧠 Theory: "The Magic Kernel"
+The heart of Atomic-1Bit is `ternary_matmul`. Instead of `Multiplication`, we do:
 ```cpp
 if (weight == 1) acc += input;
 if (weight == -1) acc -= input;
 // if weight == 0, do nothing (Sparsity!)
 ```
-This is mathematically equivalent to Matrix Multiplication for {-1, 0, 1} weights but requires significantly less energy and silicon area.
+This reduces energy consumption and memory bandwidth significantly.
 
-## 🔮 Gist Tokens
-The engine supports **Thought Compression**. Instead of processing a long system prompt token-by-token at runtime, we pre-compute a **Gist Vector** (1, Dim). The C++ runner injects this vector into the attention stream, giving the model context with **0 compute cost** at inference time.
+**Gist Tokens**: The engine supports **Thought Compression**. We pre-compute a **Gist Vector** (System Prompt) and inject it into the attention stream with 0 compute cost at inference time.
+
+![Gist Flow](assets/diagram_gist_flow_1765658121862.png)
+
+---
+
+## 📱 ESP32 Support
+Check out [embedded/ESP32_PORT_GUIDE.md](embedded/ESP32_PORT_GUIDE.md) for running on Arduino/ESP32.
 
 ---
 

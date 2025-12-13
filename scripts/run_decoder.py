@@ -1,6 +1,12 @@
 import torch
 import json
 import tiktoken
+import sys
+import os
+
+# Add root and benchmarks to path
+sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.append(os.path.join(os.path.dirname(__file__), "..", "benchmarks"))
 from baseline_fp16 import FP16Transformer, FP16Config
 from atomic_1bit.model.transformer import AtomicTransformer, AtomicConfig
 
@@ -12,7 +18,7 @@ HEADS = 4
 CONTEXT_LEN = 64
 
 def get_vocab():
-    with open("weights/benchmark_vocab.json", "r") as f:
+    with open("../weights/benchmark_vocab.json", "r") as f:
         data = json.load(f)
         reverse_map = {int(k): v for k, v in data["reverse_map"].items()}
     return reverse_map
@@ -44,7 +50,7 @@ def run():
     # 2. FP16 Baseline Output (Generate new)
     fp_config = FP16Config(vocab_size=VOCAB_SIZE, dim=DIM, depth=DEPTH, heads=HEADS, context_length=CONTEXT_LEN)
     fp_model = FP16Transformer(fp_config)
-    fp_model.load_state_dict(torch.load("weights/baseline_model.pt", map_location="cpu"))
+    fp_model.load_state_dict(torch.load("../weights/baseline_model.pt", map_location="cpu"))
     fp_model.eval()
     
     # Start with token 42

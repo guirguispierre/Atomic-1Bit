@@ -1,5 +1,7 @@
 import sys
 import os
+# Add root to path
+sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
@@ -88,13 +90,13 @@ def train_tiny():
             print(f"Skipping step {step}: {e}")
             
     # 4. Save
-    os.makedirs("weights", exist_ok=True)
-    out_path = "weights/benchmark_model.pt"
+    os.makedirs("../weights", exist_ok=True)
+    out_path = "../weights/benchmark_model.pt"
     torch.save(model.state_dict(), out_path)
     print(f"Saved to {out_path}")
     
     # Save Vocab ID map for inference consistency (used by Python runner)
-    with open("weights/benchmark_vocab.json", "w") as f:
+    with open("../weights/benchmark_vocab.json", "w") as f:
         json.dump({"token_map": token_map, "reverse_map": reverse_map}, f)
 
 if __name__ == "__main__":

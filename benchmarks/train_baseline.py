@@ -4,6 +4,9 @@ import torch.optim as optim
 import tiktoken
 import numpy as np
 import os
+import sys
+# Add root to path (for consistency if needed, though baseline_fp16 is local)
+sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 import json
 from datasets import load_dataset
 from baseline_fp16 import FP16Transformer, FP16Config
@@ -27,8 +30,8 @@ def train_baseline():
     print(f"Device: {device}")
     
     # Reuse vocab from Atomic run if possible for fair comparison
-    if os.path.exists("weights/benchmark_vocab.json"):
-        with open("weights/benchmark_vocab.json", "r") as f:
+    if os.path.exists("../weights/benchmark_vocab.json"):
+        with open("../weights/benchmark_vocab.json", "r") as f:
             data = json.load(f)
             token_map = {int(k): v for k, v in data["token_map"].items()}
             # Handle string keys if json loaded them as strings
@@ -75,7 +78,7 @@ def train_baseline():
         if step % 20 == 0:
             print(f"Step {step}/{STEPS} Loss: {loss.item():.4f}")
             
-    out_path = "weights/baseline_model.pt"
+    out_path = "../weights/baseline_model.pt"
     torch.save(model.state_dict(), out_path)
     print(f"Saved to {out_path}")
 

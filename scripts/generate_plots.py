@@ -14,7 +14,8 @@ metrics = {
 
 def save_plot(name):
     plt.tight_layout()
-    plt.savefig(f"{name}.png", dpi=150)
+    os.makedirs("../assets", exist_ok=True)
+    plt.savefig(f"../assets/{name}.png", dpi=150)
     plt.close()
 
 # 1. Model Size Chart

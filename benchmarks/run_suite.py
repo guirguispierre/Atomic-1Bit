@@ -1,7 +1,11 @@
 import torch
 import time
-import os
 import sys
+import os
+
+# Add root to sys.path to find atomic_1bit
+sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
+
 import tracemalloc
 import json
 import subprocess
@@ -9,7 +13,13 @@ import matplotlib.pyplot as plt
 from atomic_1bit.model.transformer import AtomicTransformer, AtomicConfig
 from baseline_fp16 import FP16Transformer, FP16Config
 
-# --- CONFIG ---
+# --- PATHS ---
+# Robustly find root directory (parent of benchmarks dir)
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+def get_path(rel_path):
+    return os.path.join(ROOT_DIR, rel_path)
+
 VOCAB_SIZE = 2048
 DIM = 128
 DEPTH = 4
@@ -77,16 +87,16 @@ def run_benchmarks():
     config = AtomicConfig(vocab_size=VOCAB_SIZE, dim=DIM, depth=DEPTH, heads=HEADS, context_length=CONTEXT_LEN)
     model = AtomicTransformer(config)
     try:
-        model.load_state_dict(torch.load("weights/benchmark_model.pt", map_location="cpu"))
+        model.load_state_dict(torch.load(get_path("weights/benchmark_model.pt"), map_location="cpu"))
         print("Loaded Atomic Weights.")
-    except:
-        print("Warning: Could not load Atomic weights. Using random.")
+    except Exception as e:
+        print(f"Warning: Could not load Atomic weights ({e}). Using random.")
         
     tps, peak = benchmark_inference(model)
     results["Atomic"]["TPS"] = tps
     results["Atomic"]["PeakRAM"] = peak
     results["Atomic"]["Params"] = get_param_count(model)
-    results["Atomic"]["SizeMB"] = measure_model_size("weights/benchmark_model.pt") # Compressed size? No, PT is uncompressed.
+    results["Atomic"]["SizeMB"] = measure_model_size(get_path("weights/benchmark_model.pt")) # Compressed size? No, PT is uncompressed.
     # Atomic model on disk in PT format is fp32/bf16 usually unless specific save. 
     # But we care about the C++ binary size really.
     
@@ -97,10 +107,10 @@ def run_benchmarks():
     fp_config = FP16Config(vocab_size=VOCAB_SIZE, dim=DIM, depth=DEPTH, heads=HEADS, context_length=CONTEXT_LEN)
     fp_model = FP16Transformer(fp_config)
     try:
-        fp_model.load_state_dict(torch.load("weights/baseline_model.pt", map_location="cpu"))
+        fp_model.load_state_dict(torch.load(get_path("weights/baseline_model.pt"), map_location="cpu"))
         print("Loaded FP16 Weights.")
-    except:
-        print("Warning: Could not load FP16 weights. Using random.")
+    except Exception as e:
+        print(f"Warning: Could not load FP16 weights ({e}). Using random.")
         
     # Convert to half for fair comparison if on CUDA/MPS, but CPU half is slow on PyTorch usually.
     # We will benchmark on CPU for consistency with C++ engine.
@@ -113,7 +123,7 @@ def run_benchmarks():
     results["FP16"]["TPS"] = tps
     results["FP16"]["PeakRAM"] = peak
     results["FP16"]["Params"] = get_param_count(fp_model)
-    results["FP16"]["SizeMB"] = measure_model_size("weights/baseline_model.pt")
+    results["FP16"]["SizeMB"] = measure_model_size(get_path("weights/baseline_model.pt"))
     
     print(f"TPS: {tps:.2f}, RAM: {peak:.2f} MB")
 
@@ -124,7 +134,7 @@ def run_benchmarks():
     # For now, we will just measure the binary size.
     # TPS will be parsed from stdout if we instrument it.
     
-    bin_path = "embedded/atomic_model.bin"
+    bin_path = get_path("embedded/atomic_model.bin")
     if os.path.exists(bin_path):
         results["CPP"]["SizeMB"] = os.path.getsize(bin_path) / (1024 * 1024)
     else:
@@ -137,7 +147,7 @@ def run_benchmarks():
         # We need to make sure the runner prints "TPS: <value>" or we time the process.
         # process time includes startup, so internal timing is better.
         # I will instrument cpp code next.
-        cmd = ["./embedded/runner"] # compiled name
+        cmd = [get_path("embedded/runner")] # compiled name
         p = subprocess.run(cmd, capture_output=True, text=True)
         print(p.stdout)
         

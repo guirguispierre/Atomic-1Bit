@@ -133,7 +133,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Export Atomic-1Bit Model to C++ Binary")
     parser.add_argument("--model", type=str, default="weights/final.pt", help="Path to .pt checkpoint")
     parser.add_argument("--output", type=str, default="atomic_model.bin", help="Output binary file")
-<<<<<<< HEAD
+
     parser.add_argument("--prompt", type=str, default=None, help="System Prompt to bake into Gist (Optional)")
     parser.add_argument("--gist_file", type=str, default=None, help="Path to pre-computed .gist file (Overrides prompt)")
     parser.add_argument("--dim", type=int, default=128, help="Model dimension")
