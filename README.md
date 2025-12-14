@@ -109,6 +109,16 @@ This reduces energy consumption and memory bandwidth significantly.
 
 ---
 
+## 🔥 Thermal Safety
+Long-running training jobs include a built-in **Thermal Monitor** to prevent hardware overheating.
+- **Auto-Pause**: If system temp > **80°C**.
+- **Auto-Resume**: When system temp < **70°C**.
+- **Safety**: Automatically saves a checkpoint (`*_thermal_safe.pt`) before pausing.
+
+*Note: On Apple Silicon (M1/M2/M3), sensors may not be readable without `sudo`. The monitor will gracefully disable itself in this case.*
+
+---
+
 ## 📱 ESP32 Support
 Check out [embedded/ESP32_PORT_GUIDE.md](embedded/ESP32_PORT_GUIDE.md) for running on Arduino/ESP32.
 

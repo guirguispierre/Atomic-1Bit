@@ -239,10 +239,22 @@ def train():
     # Scheduler
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=additional_steps, eta_min=1e-5)
     
+    # Init Thermal Monitor
+    from atomic_1bit.utils.thermal import ThermalMonitor
+    thermal_monitor = ThermalMonitor(high_threshold=80.0, resume_threshold=70.0)
+    
     print(f"Training from {start_step} to {total_steps_target}...")
     
     try:
         for step in range(start_step, total_steps_target):
+            # Thermal Check
+            thermal_monitor.check_and_pause(
+                step=step, 
+                model=model, 
+                optimizer=optimizer, 
+                save_path=ckpt_path.replace(".pt", "_thermal_safe.pt")
+            )
+
             x, y = ds.get_batch(BATCH_SIZE)
             x, y = x.to(device), y.to(device)
             
