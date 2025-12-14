@@ -36,10 +36,16 @@ def ternary_matmul(activations: np.ndarray, weights: np.ndarray) -> np.ndarray:
     """
     # Ensure inputs are contiguous C-style arrays of correct type
     A = np.ascontiguousarray(activations, dtype=np.int8)
-    B = np.ascontiguousarray(weights, dtype=np.int8)
+    
+    # KERNEL FIX: The C++ kernel expects B to be (N, K) layout (Transposed).
+    # We transpose here so the user can pass standard (K, N) weights.
+    # Standard: (K, N). Transposed: (N, K).
+    # We make it contiguous row-major (N, K) so kernel reads rows efficiently.
+    B_transposed = weights.T
+    B = np.ascontiguousarray(B_transposed, dtype=np.int8)
     
     M, K = A.shape
-    K_w, N = B.shape
+    N, K_w = B.shape # B is (N, K) now
     
     if K != K_w:
         raise ValueError(f"Shape mismatch: A({M},{K}) vs B({K_w},{N})")

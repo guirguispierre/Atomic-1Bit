@@ -10,15 +10,10 @@ from atomic_1bit.model.transformer import AtomicTransformer, AtomicConfig
 from atomic_1bit.model.gist import GistEncoder, GistConfig
 import torch
 
-def quantize_and_transpose_weight(w_f32):
-    """
-    Takes float weights (Out, In), quantizes to {-1, 0, 1}.
-    Returns int8 numpy array (Out, In).
-    Note: Optimized Kernel expects (Out, In) layout for SIMD access.
-    """
-    scale = 1.0 / w_f32.abs().mean().clamp(min=1e-5)
-    w_q = (w_f32 * scale).round().clamp(-1, 1).to(torch.int8)
-    return w_q.cpu().numpy()
+def quantize_and_transpose_weight(w):
+    scale = 1.0 / w.abs().mean().clamp(min=1e-5)
+    w_q = (w * scale).round().clamp(-1, 1).to(torch.int8)
+    return w_q.t().contiguous().cpu().numpy()
 
 
 def export_model(model: AtomicTransformer, filename: str, prompt: str = None, gist_file: str = None):
@@ -86,6 +81,16 @@ def export_model(model: AtomicTransformer, filename: str, prompt: str = None, gi
             # needs_quant: If True, quantize float->int8{-1,0,1} and transpose
             
             if needs_quant:
+                 # Compute scale (mean_abs)
+                 # w_f32 ~= w_q * scale
+                 # scale = mean(abs(w))
+                 scale_val = tensor.abs().mean().clamp(min=1e-5).item()
+                 packed = struct.pack("f", scale_val)
+                 import binascii
+                 hex_str = binascii.hexlify(packed).decode('utf-8')
+                 f.write(packed)
+                 print(f"  Wrote scale: {scale_val:.6f} [Hex: {hex_str}]")
+
                  data = quantize_and_transpose_weight(tensor)
                  f.write(data.tobytes())
                  print(f"  Wrote {name}: {data.shape} (b - quantized)")
@@ -148,16 +153,24 @@ if __name__ == "__main__":
     parser.add_argument("--heads", type=int, default=4, help="Number of heads")
     parser.add_argument("--context_len", type=int, default=64, help="Context length")
     parser.add_argument("--vocab_size", type=int, default=2048, help="Vocab size")
-    # 3. Export Header
-    f = open(args.output, "wb")
     
-    # MAGIC + VERSION
-    f.write(struct.pack("I", 0x41544F4D)) # 'ATOM'
-    f.write(struct.pack("I", 1))          # Version 1
+    args = parser.parse_args()
 
-    # Config
-    # This line was malformed in the original request.
-    # Assuming the intent was to write vocab_size after config is defined.
+    # 3. Export Header
+    # Note: export_model() writes the header too. We should rely on export_model.
+    # But if we want to support the CLI correctly, we call export_model.
+    # The erroneous lines were added to support ATOM header check.
+    # export_model already writes the header!
+    # So lines 152-156 are redundant if export_model is called.
+    # Let's see if export_model is called.
+    
+    config = AtomicConfig(
+        vocab_size=args.vocab_size, 
+        dim=args.dim, 
+        depth=args.depth, 
+        heads=args.heads, 
+        context_length=args.context_len
+    )
     # The actual writing of config parameters is handled by the export_model function.
     # This specific line `f.write(struct.pack("I", config.vocab_size))` is removed
     # as the `export_model` function already writes the full header.
@@ -186,9 +199,9 @@ if __name__ == "__main__":
     # The `f.write(struct.pack("I", config.vocab_size))=args.vocab_size, ...` part
     # is syntactically invalid and refers to the `AtomicConfig` constructor.
     # I will only insert the valid parts of the requested change.
-    f.close() # Close the file opened here, as export_model will open it again.
-
     args = parser.parse_args()
+    
+    # Init config
     config = AtomicConfig(
         vocab_size=args.vocab_size, 
         dim=args.dim, 
@@ -196,31 +209,17 @@ if __name__ == "__main__":
         heads=args.heads, 
         context_length=args.context_len
     )
-    model = AtomicTransformer(config)
+    
     print(f"Initialized Model: Dim={args.dim}, Depth={args.depth}, Heads={args.heads}")
-
-    # Defaults (Pocket Stories)
-    VOCAB_SIZE = 4096
-    DIM = 256
-    DEPTH = 6
-    HEADS = 4
-    CONTEXT_LEN = 128
+    model = AtomicTransformer(config)
 
     # 2. Load Checkpoint
     if args.model:
         if os.path.exists(args.model):
             print(f"Loading checkpoint from {args.model}...")
-            # map_location='cpu' to be safe
             state_dict = torch.load(args.model, map_location="cpu")
-            # If state dict has 'module.' prefix (from DataParallel), strip it? 
-            # Usually not needed for single GPU training but good practice.
-            # model.load_state_dict(state_dict)
-            
-            # Strict=False might be needed if there are extra buffers? 
-            # Our BitLinear has no extra buffers, just weight/bias.
             try:
                 if "model_state_dict" in state_dict:
-                    print("  (Detected Checkpoint Wrapper - unwrapping)")
                     state_dict = state_dict["model_state_dict"]
                 
                 model.load_state_dict(state_dict, strict=False) 
@@ -229,9 +228,16 @@ if __name__ == "__main__":
                 print(f"Error loading checkpoint: {e}")
                 print("Continuing with random weights (WARNING)...")
         else:
-            print(f"Checkpoint {args.model} not found! Using random weights.")
-    else:
-        print("No checkpoint specified. Using random weights.")
+            print(f"Model file {args.model} not found. using random weights.")
+            
+    # Load Gist if needed
+    gist_vector = None
+    if args.gist_file:
+         print(f"Loading Gist from {args.gist_file}...")
+         pass
+
+    # 3. Export
+    export_model(model, args.output, gist_vector)
 
     # 3. Export
     export_model(model, args.output, prompt=args.prompt, gist_file=args.gist_file)

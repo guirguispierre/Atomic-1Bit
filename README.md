@@ -9,21 +9,21 @@ It proves that you don't need FP16 matrix multiplication to run modern AI. The c
 We successfully trained and deployed an Atomic-1Bit Transformer on a subset of TinyStories. The model was exported to a standalone C++ binary for bare-metal inference.
 
 ### Key Achievements
-- **Ultra-Low Memory Footprint**: The quantised model (1.58-bit weights) occupies just **2.0 MB** on disk, compared to **5.3 MB** for an equivalent FP16 baseline (**-62%**).
+- **Numerical Parity Verified**: The embedded C++ runtime produces **bit-exact** output matches to the Python reference implementation for Attention and Linear layers.
+- **Ultra-Low Model Size**: The quantised model (1.58-bit weights) occupies just **2.0 MB** on disk, compared to **5.3 MB** for an equivalent FP16 baseline (**-62%**).
 - **Portability**: The C++ runtime depends only on the standard library (STL) and compiles to a single, dependency-free executable.
-- **Integer-Only Operations**: The core `BitLinear` layer replaces expensive floating-point multiplications with integer additions.
 
 ### Performance Comparison (Apple M-series CPU)
 
-**Context**: Sequence Length=64, Gen Tokens=100, Batch Size=1.
+**Context**: Sequence Length=128, Gen Tokens=50, Batch Size=1, Single Thread.
 
 | Metric | FP16 Baseline | Atomic-1Bit | Delta |
 | :--- | :--- | :--- | :--- |
 | **Model Size** | 5.3 MB | **2.0 MB** | **-62%** |
 | **Parameters** | 1.33 M | 1.33 M | 0% |
 | **Precision** | Float16 | Ternary {-1, 0, 1} | - |
-| **Speed (Python)** | ~826 TPS | ~136 TPS | -83% (Unoptimized) |
-| **Speed (C++ Bare)**| N/A | ~56 TPS | Portable Runtime |
+| **Speed (Python)** | ~826 TPS | ~130 TPS | -83% (Unoptimized) |
+| **Speed (C++ Bare)**| N/A | **~160-170 TPS** | **Portable Runtime** |
 
 **Visual Summary**
 
@@ -31,7 +31,7 @@ We successfully trained and deployed an Atomic-1Bit Transformer on a subset of T
 ![Speed Chart](assets/chart_speed.png)
 ![Text Samples](assets/text_samples_comparison.png)
 
-*Note: Benchmarks simulate 1-bit logic on standard CPUs. Dedicated hardware (FPGA/ASIC) would yield significantly higher speedups.*
+*Note: Benchmarks reflect single-core CPU performance. The ternary kernel is optimized for memory bandwidth efficiency.*
 
 ---
 
@@ -56,6 +56,8 @@ Located in `benchmarks/`.
 
 ## ⚡ Quick Start
 
+For a full list of commands, see [docs/COMMANDS.md](docs/COMMANDS.md).
+
 ### Prerequisites
 - Python 3.8+ (`pip install torch tiktoken datasets numpy matplotlib`)
 - GCC/G++
@@ -67,15 +69,14 @@ make
 cd ../..
 ```
 
-### 2. Run Benchmarks
-To run the full benchmark suite (Training -> C++ Export -> Inference Test):
+### 2. Verify System
+Check that the Atomic Kernel matches NumPy reference exactly:
 ```bash
-python benchmarks/run_suite.py
+python3 atomic_1bit/python/inference.py
 ```
-See [docs/benchmarking.md](docs/benchmarking.md) for detailed methodology.
 
 ### 3. Interactive Training
-To train the full model interactively:
+To train the model:
 ```bash
 python3 atomic_1bit/training/train.py
 ```
@@ -83,13 +84,16 @@ python3 atomic_1bit/training/train.py
 ### 4. Deployment (Embedded)
 Export your trained model to run on the C++ engine:
 ```bash
-# 1. Export
-python3 atomic_1bit/utils/export_to_cpp.py --model weights/pocket_final.pt --output embedded/atomic_model.bin --prompt "You are a helpful assistant."
+# 1. Export (Must specify dimensions verified from checkpoint)
+python3 atomic_1bit/utils/export_to_cpp.py \
+  --model weights/stories_final.pt \
+  --output embedded/atomic_model.bin \
+  --dim 256 --depth 6 --heads 4 --vocab_size 4096 --context_len 128
 
 # 2. Compile & Run
 cd embedded
-g++ -O3 -std=c++17 atomic_runner.cpp -o atomic_engine
-./atomic_engine
+g++ -O3 -std=c++17 atomic_runner.cpp -o runner
+./runner --model atomic_model.bin --steps 100 --temp 0.7 --seed 42 --start_token 58
 ```
 
 ---

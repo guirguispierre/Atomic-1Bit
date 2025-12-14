@@ -50,7 +50,7 @@ class ThermalMonitor:
         except:
             return 0.0
 
-    def check_and_pause(self, step, model=None, optimizer=None, save_path=None):
+    def check_and_pause(self, step, model=None, optimizer=None, scheduler=None, save_path=None):
         """
         Checks temperature. If too high, pauses execution until cool.
         
@@ -58,6 +58,7 @@ class ThermalMonitor:
             step: Current training step (used to respect interval).
             model: Optional model to save checkpoint before pausing.
             optimizer: Optional optimizer to save state.
+            scheduler: Optional scheduler to save state.
             save_path: Path to save the safety checkpoint.
         """
         if not self.enabled:
@@ -81,6 +82,8 @@ class ThermalMonitor:
                     payload = {"step": step, "model_state_dict": model.state_dict()}
                     if optimizer:
                         payload["optimizer_state_dict"] = optimizer.state_dict()
+                    if scheduler:
+                        payload["scheduler_state_dict"] = scheduler.state_dict()
                     torch.save(payload, save_path)
                     print("Safety checkpoint saved.")
                 except Exception as e:
