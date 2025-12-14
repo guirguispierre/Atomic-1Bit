@@ -239,6 +239,14 @@ def train():
     # Scheduler
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=additional_steps, eta_min=1e-5)
     
+    # Attempt to load scheduler state if we resumed
+    if os.path.exists(ckpt_path) and "scheduler_state_dict" in checkpoint:
+        try:
+            scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+            print("   Scheduler state restored.")
+        except Exception as e:
+            print(f"   Warning: Could not restore scheduler state ({e})")
+    
     # Init Thermal Monitor
     from atomic_1bit.utils.thermal import ThermalMonitor
     thermal_monitor = ThermalMonitor(high_threshold=80.0, resume_threshold=70.0)
@@ -251,7 +259,8 @@ def train():
             thermal_monitor.check_and_pause(
                 step=step, 
                 model=model, 
-                optimizer=optimizer, 
+                optimizer=optimizer,
+                scheduler=scheduler,
                 save_path=ckpt_path.replace(".pt", "_thermal_safe.pt")
             )
 
@@ -275,15 +284,18 @@ def train():
                 save_dict = {
                     "step": step,
                     "model_state_dict": model.state_dict(),
-                    "optimizer_state_dict": optimizer.state_dict()
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "scheduler_state_dict": scheduler.state_dict()
                 }
                 torch.save(save_dict, ckpt_path) 
                 print(f"Saved checkpoint to {ckpt_path}")
-
+                
+        # Final Save
         save_dict = {
             "step": total_steps_target,
             "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict()
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict()
         }
         torch.save(save_dict, ckpt_path)
         print("Done.")
@@ -293,7 +305,8 @@ def train():
         save_dict = {
             "step": step,
             "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict()
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict()
         }
         torch.save(save_dict, ckpt_path)
         print("Progress saved.")
