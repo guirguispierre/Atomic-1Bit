@@ -23,25 +23,37 @@
 
 ---
 
-## ✅ v1.2 — Hardware-Native Backends (Completed)
+## ✅ v1.2 — Hardware-Native Backends (Completed & Verified)
 **Goal:** Prove Atomic-1Bit works beyond general-purpose CPUs.
 
 ### Achievements
-- [x] **Metal backend** (Apple Silicon) - Zero-copy memory & compute shaders
-- [x] **CUDA backend** (NVIDIA) - Shared memory tiled matmul
+- [x] **Metal backend** (Apple Silicon) - Verified Parity
+- [x] **CUDA backend** (NVIDIA) - Implemented
 - [x] **Modular Architecture** - CPU/GPU conditional compilation
 
 ---
 
-## 📈 v1.3 — Model Scaling & Quality (In Progress)
+## 🔄 v1.3 — Model Scaling & Quality (Active)
 **Goal:** Demonstrate that low-bit inference scales in quality, not just efficiency.
 
 ### Planned
-- [ ] **Train 50M–100M parameter ternary models**
-- [ ] **Improved training stability** (scheduler + clipping)
-- [ ] **Evaluation suite** (perplexity, repetition, coherence)
+- [x] **Flagship 12.5M Parameter Config** (8L, 320d, 5h)
+- [x] **Training Stability** (Cosine Scheduler, Grad Clipping, Thermal Safety)
+- [x] **Evaluation Suite** (PPL, Repetition Penalty)
+- [ ] **Train High-Fidelity Model**
 
 **Outcome:** Higher-quality samples suitable for public demos
+
+---
+
+## 🧩 v2.0 — Atomic Inference System
+**Goal:** Evolve Atomic-1Bit into a general low-bit inference framework.
+
+### Planned
+- [ ] **Support for mixed-precision** (2-bit, 3-bit, hybrid)
+- [ ] **Pluggable quantization backends**
+- [ ] **Mobile and microcontroller demos** (ESP32-class)
+- [ ] **Optional FPGA / ASIC exploration**
 
 ---
 

@@ -15,8 +15,12 @@ import numpy as np
 from datasets import load_dataset
 from atomic_1bit.model.transformer import AtomicTransformer, AtomicConfig
 
-# --- EFFICIENT INSTRUCT CONFIG ---
-# "Flagship" 10M Parameter Model.
+import csv
+import time
+from atomic_1bit.utils.thermal import ThermalMonitor
+
+# --- EFFICIENT INSTRUCT CONFIG (v1.3) ---
+# "Flagship" 12.5M Parameter Model.
 # High Quality, Low RAM.
 BATCH_SIZE = 32         # Physical batch size
 GRAD_ACCUM_STEPS = 4    # Effective batch = 32 * 4 = 128
@@ -27,6 +31,8 @@ HEADS = 5               # 320/5 = 64
 VOCAB_SIZE = 4096       # Compressed
 UNK_ID = VOCAB_SIZE - 1
 LR = 6e-4
+WARMUP_STEPS = 500      # 500 steps linear warmup
+CLIP_GRAD = 1.0         # Gradient Clipping Threshold
 
 class EfficientInstructDataset:
     def __init__(self, split="train", context_length=256, vocab_file="weights/vocab_map_instruct.json"):
@@ -219,10 +225,21 @@ def train():
 
     print(f"Params: {sum(p.numel() for p in model.parameters())/1e6:.2f}M")
     
+    # --- v1.3 STABILITY & MONITORING ---
+    thermal_monitor = ThermalMonitor(high_threshold=80.0, resume_threshold=70.0, check_interval_steps=50)
+    
+    log_file = os.path.join(weights_dir, "training_log.csv")
+    if not os.path.exists(log_file):
+        with open(log_file, "w") as f:
+            f.write("step,loss,lr,step_time_ms\n")
+            
     steps_input = input(f"Current Step: {start_step}. How many ADDITIONAL steps to train? (Def: 5000): ")
     additional_steps = int(steps_input) if steps_input.strip() else 5000
     total_steps_target = start_step + additional_steps
     
+    # Cosine Annealing with Warmup handling
+    # If resuming, we need to handle scheduler state, but here we restart a new schedule for simplicity in v1.3 demo
+    # or chain it. For now, simple Cosine.
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=additional_steps, eta_min=1e-5)
     
     print(f"Training from {start_step} to {total_steps_target} (Grad Accum: {GRAD_ACCUM_STEPS})...")
@@ -230,7 +247,12 @@ def train():
     optimizer.zero_grad()
     
     try:
+        step_start_time = time.time()
+        
         for step in range(start_step, total_steps_target):
+            # 1. Thermal Safety Check
+            thermal_monitor.check_and_pause(step, model=model, optimizer=optimizer, scheduler=scheduler, save_path=ckpt_path + ".safe")
+
             # Gradient Accumulation
             loss_accum = 0.0
             for _ in range(GRAD_ACCUM_STEPS):
@@ -243,12 +265,25 @@ def train():
                 loss.backward()
                 loss_accum += loss.item()
             
+            # 2. Gradient Clipping
+            torch.nn.utils.clip_grad_norm_(model.parameters(), CLIP_GRAD)
+            
             optimizer.step()
             optimizer.zero_grad()
             scheduler.step()
             
+            # Timing
+            step_end_time = time.time()
+            step_duration_ms = (step_end_time - step_start_time) * 1000
+            step_start_time = step_end_time
+            
+            # Logging
             if step % 10 == 0:
-                print(f"Step {step}/{total_steps_target} | Loss: {loss_accum:.4f} | LR: {scheduler.get_last_lr()[0]:.2e}")
+                current_lr = scheduler.get_last_lr()[0]
+                print(f"Step {step}/{total_steps_target} | Loss: {loss_accum:.4f} | LR: {current_lr:.2e} | Time: {step_duration_ms:.1f}ms")
+                
+                with open(log_file, "a") as f:
+                    f.write(f"{step},{loss_accum:.5f},{current_lr:.5e},{step_duration_ms:.1f}\n")
                 
             if step % 500 == 0:
                 generate_demo(model, ds, "What is AI?")
@@ -257,7 +292,8 @@ def train():
                 save_dict = {
                     "step": step,
                     "model_state_dict": model.state_dict(),
-                    "optimizer_state_dict": optimizer.state_dict()
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "scheduler_state_dict": scheduler.state_dict()
                 }
                 torch.save(save_dict, ckpt_path) 
                 print(f"Saved checkpoint to {ckpt_path}")

@@ -9,9 +9,9 @@ It proves that you don't need FP16 matrix multiplication to run modern AI. The c
 We successfully trained and deployed an Atomic-1Bit Transformer on a subset of TinyStories. The model was exported to a standalone C++ binary for bare-metal inference.
 
 ### Key Achievements
-- **Numerical Parity Verified**: The embedded C++ runtime produces **bit-exact** output matches to the Python reference implementation for Attention and Linear layers.
-- **Ultra-Low Model Size**: The quantised model (1.58-bit weights) occupies just **2.0 MB** on disk, compared to **5.3 MB** for an equivalent FP16 baseline (**-62%**).
-- **Portability**: The C++ runtime depends only on the standard library (STL) and compiles to a single, dependency-free executable.
+- **Numerical Parity Verified**: The modular C++ runtime produces **bit-exact** output matches to the Python reference implementation for CPU and Metal backends.
+- **Ultra-Low Model Size**: The flagship 12.5M parameter 1.58-bit model occupies minimal disk space compared to FP16 baselines.
+- **Portability**: The system supports conditional compilation for CPU, Metal, and CUDA backends.
 
 ### Performance Comparison (Apple M-series CPU)
 
