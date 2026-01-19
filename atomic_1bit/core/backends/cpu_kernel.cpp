@@ -1,4 +1,4 @@
-#include "kernel.h"
+#include "../kernel.h"
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -17,18 +17,10 @@
 #define USE_AVX2
 #endif
 
-// Helper to sum vector registers
-// (Not strictly necessary if we accumulate into a running vec and horizontal
-// sum at end)
-
 void ternary_matmul(const int8_t *A, const int8_t *B_transposed, int32_t *C,
                     int M, int N, int K) {
   // OPTIMIZATION NOTE:
   // This kernel ASSUMES 'B' is transposed to shape (N, K) [Row-Major].
-  // This means accessing B[j * K + k] is contiguous for the inner loop over K.
-  //
-  // Standard PyTorch weights are (Out, In) -> (N, K). So if you export raw
-  // weights, you are good! Do NOT transpose to (In, Out) in your exporter.
 
 #pragma omp parallel for collapse(2) schedule(static)
   for (int i = 0; i < M; ++i) {
@@ -80,23 +72,10 @@ void ternary_matmul(const int8_t *A, const int8_t *B_transposed, int32_t *C,
 
         // _mm256_sign_epi8(a, b):
         // Negates a if b < 0, Zeroes a if b == 0, Preserves a if b > 0.
-        // This is EXACTLY Ternary Multiplication where B is the selector!
-        // Result = A * Sign(B).
         __m256i vprod = _mm256_sign_epi8(va, vb);
-
-        // Summing bytes is tricky. 'maddubs' multiplies unsigned*signed.
-        // We use pmaddubsw with '1' to sum adjacent bytes?
-        // No, we already did the mult. We just need to sum vprod bytes.
-        // vprod is signed int8.
-        // maddubs requires input A to be unsigned.
-        // Alternative: Sign extend to 16-bit and add.
 
         __m256i v_lo = _mm256_cvtepi8_epi16(_mm256_castsi256_si128(vprod));
         __m256i v_hi = _mm256_cvtepi8_epi16(_mm256_extracti128_si256(vprod, 1));
-
-        // Now we have two 256-bit vectors of int16.
-        // We can use madd_epi16 with '1' to sum pairs horizontally?
-        // _mm256_madd_epi16(a, b) -> sum(a[i]*b[i] + a[i+1]*b[i+1]) -> int32
 
         v_lo = _mm256_madd_epi16(v_lo, ones); // sums pairs to int32
         v_hi = _mm256_madd_epi16(v_hi, ones);
@@ -111,7 +90,6 @@ void ternary_matmul(const int8_t *A, const int8_t *B_transposed, int32_t *C,
       __m128i vhigh = _mm256_extracti128_si256(v_acc, 1);
       vlow = _mm_add_epi32(vlow, vhigh);
       // Scan sum
-      // (naive scalar extraction)
       int32_t tmp[4];
       _mm_storeu_si128((__m128i *)tmp, vlow);
       total += tmp[0] + tmp[1] + tmp[2] + tmp[3];

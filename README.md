@@ -23,7 +23,9 @@ We successfully trained and deployed an Atomic-1Bit Transformer on a subset of T
 | **Parameters** | 1.33 M | 1.33 M | 0% |
 | **Precision** | Float16 | Ternary {-1, 0, 1} | - |
 | **Speed (Python)** | ~826 TPS | ~130 TPS | -83% (Unoptimized) |
-| **Speed (C++ Bare)**| N/A | **~160-170 TPS** | **Portable Runtime** |
+| **Speed (C++ CPU)**| N/A | **~160-170 TPS** | **Portable Runtime** |
+| **Speed (Metal)**| N/A | **~TBD TPS** | **Apple Silicon Optimized** |
+| **Speed (CUDA)**| N/A | **~TBD TPS** | **NVIDIA GPU Optimized** |
 
 **Visual Summary**
 
@@ -44,9 +46,10 @@ Located in `atomic_1bit/`.
 - **Components**: `BitLinear`, `AtomicTransformer`, `GistEncoder`.
 
 ### 2. Bare Metal Stack (C++)
-Located in `embedded/`.
-- **Purpose**: Deployment on constrained devices (Raspberry Pi, ESP32).
-- **Structure**: Header-only library (`atomic_lib.h`) + Runner (`atomic_runner.cpp`).
+Located in `embedded/` and `atomic_1bit/core/`.
+- **Purpose**: Deployment on constrained devices (Raspberry Pi, ESP32) and high-performance hardware.
+- **Structure**: Modular backend architecture (`backends/`) supporting CPU, Metal, and CUDA.
+- **Components**: `atomic_lib.h`, `cpu_kernel.cpp`, `metal_kernel.mm`, `cuda_kernel.cu`.
 
 ### 3. Benchmarking Suite
 Located in `benchmarks/`.

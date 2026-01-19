@@ -23,19 +23,17 @@
 
 ---
 
-## 🧠 v1.2 — Hardware-Native Backends
+## ✅ v1.2 — Hardware-Native Backends (Completed)
 **Goal:** Prove Atomic-1Bit works beyond general-purpose CPUs.
 
-### Planned
-- [ ] **Metal backend** (Apple Silicon)
-- [ ] **CUDA proof-of-concept kernel**
-- [ ] **ARM NEON optimizations** (Raspberry Pi / SBCs)
-
-**Focus:** Maintain numerical parity while measuring energy + throughput gains
+### Achievements
+- [x] **Metal backend** (Apple Silicon) - Zero-copy memory & compute shaders
+- [x] **CUDA backend** (NVIDIA) - Shared memory tiled matmul
+- [x] **Modular Architecture** - CPU/GPU conditional compilation
 
 ---
 
-## 📈 v1.3 — Model Scaling & Quality
+## 📈 v1.3 — Model Scaling & Quality (In Progress)
 **Goal:** Demonstrate that low-bit inference scales in quality, not just efficiency.
 
 ### Planned

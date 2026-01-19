@@ -12,6 +12,10 @@ atomic_model.bin
 *.pt
 weights/
 
+# Metal Artifacts
+*.metallib
+*.air
+
 # Python
 __pycache__/
 *.py[cod]
