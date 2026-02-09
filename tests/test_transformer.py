@@ -29,13 +29,13 @@ class TestBitAttention:
     def test_output_shape(self, tiny_config):
         attn = BitAttention(tiny_config)
         x = torch.randn(2, 8, tiny_config.dim)
-        y = attn(x)
+        y, _ = attn(x)
         assert y.shape == x.shape
 
     def test_single_token(self, tiny_config):
         attn = BitAttention(tiny_config)
         x = torch.randn(1, 1, tiny_config.dim)
-        y = attn(x)
+        y, _ = attn(x)
         assert y.shape == (1, 1, tiny_config.dim)
 
     def test_causal_mask(self, tiny_config):
@@ -44,11 +44,21 @@ class TestBitAttention:
         attn.eval()
         x = torch.randn(1, 4, tiny_config.dim)
         with torch.no_grad():
-            y_full = attn(x)
-            # Truncated input should produce same first-token output
-            y_partial = attn(x[:, :1, :])
-        # First token output should be the same regardless of future tokens
+            y_full, _ = attn(x)
+            y_partial, _ = attn(x[:, :1, :])
         assert torch.allclose(y_full[:, 0, :], y_partial[:, 0, :], atol=1e-5)
+
+    def test_kv_cache(self, tiny_config):
+        """KV-cache should produce same output as full forward pass."""
+        attn = BitAttention(tiny_config)
+        attn.eval()
+        x = torch.randn(1, 4, tiny_config.dim)
+        with torch.no_grad():
+            y_full, _ = attn(x)
+            # Process first 3 tokens, cache, then process 4th
+            y_prefix, cache = attn(x[:, :3, :])
+            y_last, _ = attn(x[:, 3:4, :], kv_cache=cache)
+        assert torch.allclose(y_full[:, 3, :], y_last[:, 0, :], atol=1e-5)
 
 
 class TestBitFeedForward:
@@ -69,7 +79,7 @@ class TestAtomicBlock:
     def test_output_shape(self, tiny_config):
         block = AtomicBlock(tiny_config)
         x = torch.randn(2, 8, tiny_config.dim)
-        y = block(x)
+        y, _ = block(x)
         assert y.shape == x.shape
 
     def test_residual_connection(self, tiny_config):
@@ -77,7 +87,7 @@ class TestAtomicBlock:
         block = AtomicBlock(tiny_config)
         x = torch.randn(2, 8, tiny_config.dim)
         with torch.no_grad():
-            y = block(x)
+            y, _ = block(x)
         assert not torch.allclose(x, y)
 
 
@@ -140,3 +150,24 @@ class TestAtomicTransformer:
         total_params = sum(p.numel() for p in model.parameters())
         # Should be roughly 12.5M params
         assert 10_000_000 < total_params < 15_000_000
+
+    def test_generate_with_cache(self, tiny_model, tiny_config):
+        """KV-cache generation should produce valid tokens."""
+        x = torch.randint(0, tiny_config.vocab_size, (1, 2))
+        result = tiny_model.generate(x, max_new_tokens=5, temperature=0, use_cache=True)
+        assert result.shape[1] == 7  # 2 input + 5 generated
+        assert (result >= 0).all() and (result < tiny_config.vocab_size).all()
+
+    def test_generate_without_cache(self, tiny_model, tiny_config):
+        """Non-cached generation should produce valid tokens."""
+        x = torch.randint(0, tiny_config.vocab_size, (1, 2))
+        result = tiny_model.generate(x, max_new_tokens=5, temperature=0, use_cache=False)
+        assert result.shape[1] == 7
+        assert (result >= 0).all() and (result < tiny_config.vocab_size).all()
+
+    def test_cache_matches_no_cache(self, tiny_model, tiny_config):
+        """Cached and non-cached generation should produce identical greedy outputs."""
+        x = torch.randint(0, tiny_config.vocab_size, (1, 2))
+        cached = tiny_model.generate(x.clone(), max_new_tokens=5, temperature=0, use_cache=True)
+        no_cache = tiny_model.generate(x.clone(), max_new_tokens=5, temperature=0, use_cache=False)
+        assert torch.equal(cached, no_cache)
