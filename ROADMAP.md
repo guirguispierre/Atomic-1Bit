@@ -55,17 +55,6 @@
 - [ ] **Mobile and microcontroller demos** (ESP32-class)
 - [ ] **Optional FPGA / ASIC exploration**
 
----
-
-## 🧩 v2.0 — Atomic Inference System
-**Goal:** Evolve Atomic-1Bit into a general low-bit inference framework.
-
-### Planned
-- [ ] **Support for mixed-precision** (2-bit, 3-bit, hybrid)
-- [ ] **Pluggable quantization backends**
-- [ ] **Mobile and microcontroller demos** (ESP32-class)
-- [ ] **Optional FPGA / ASIC exploration**
-
 **Deliverable:** Research-grade system with real deployment targets
 
 ---
