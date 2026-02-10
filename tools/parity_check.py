@@ -98,8 +98,9 @@ def run_parity_check():
                 print(f"  Manual Dequant: {dequant}")
             
             q_out = layer.attn.q_proj(x_norm)
+            attn_out = layer.attn(x_norm)
             print_tensor_stats(f"Layer{i}_Attn_Out", attn_out)
-            
+
             x = x + attn_out
             
             # LN2

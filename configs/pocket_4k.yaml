@@ -1,0 +1,21 @@
+model:
+  name: "atomic-pocket"
+  dim: 256
+  depth: 4
+  heads: 4
+  context_length: 128
+  vocab_size: 4096
+
+quantization:
+  weight_bits: 1.58
+  activation_bits: 8
+
+training:
+  batch_size: 64
+  grad_accum_steps: 4
+  learning_rate: 6.0e-4
+  warmup_steps: 500
+  max_steps: 15000
+  weight_decay: 0.1
+  clip_grad: 1.0
+  dataset: "tinystories"

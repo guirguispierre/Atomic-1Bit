@@ -1,0 +1,2 @@
+Perplexity: 54.79
+Avg Repetition Rate: 0.0%

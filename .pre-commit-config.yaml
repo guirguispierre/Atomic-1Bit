@@ -1,0 +1,28 @@
+repos:
+  - repo: https://github.com/psf/black
+    rev: 24.4.2
+    hooks:
+      - id: black
+        language_version: python3
+
+  - repo: https://github.com/pycqa/isort
+    rev: 5.13.2
+    hooks:
+      - id: isort
+        args: ["--profile", "black"]
+
+  - repo: https://github.com/pycqa/flake8
+    rev: 7.0.0
+    hooks:
+      - id: flake8
+        args: ["--max-line-length=120", "--ignore=E203,W503"]
+
+  - repo: local
+    hooks:
+      - id: parity-check
+        name: Kernel Parity Verification
+        entry: python3 atomic_1bit/python/inference.py
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]
+        files: '(atomic_1bit/core/|atomic_1bit/nn/|atomic_1bit/python/wrapper\.py|embedded/)'
