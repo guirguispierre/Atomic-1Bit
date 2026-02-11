@@ -40,3 +40,20 @@ benchmark_results.json
 
 # Debug
 *.dSYM/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+training_log*.csv
+
+# Packaging
+*.egg-info/
+dist/
+build/
+.eggs/
