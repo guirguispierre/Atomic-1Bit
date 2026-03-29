@@ -30,7 +30,7 @@ def decode(tokens, reverse_map, enc):
         try:
             word = enc.decode([gpt_id])
             text += word
-        except:
+        except (UnicodeDecodeError, ValueError, KeyError):
             pass
     return text
 

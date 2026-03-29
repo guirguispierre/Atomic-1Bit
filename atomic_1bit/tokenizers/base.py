@@ -29,9 +29,10 @@ class AtomicTokenizer(ABC):
         ...
 
     @property
+    @abstractmethod
     def eot_token(self) -> int:
         """End-of-text token ID."""
-        raise NotImplementedError
+        ...
 
 
 class TiktokenWrapper(AtomicTokenizer):
