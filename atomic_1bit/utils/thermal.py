@@ -1,8 +1,11 @@
+import logging
 import psutil
 import time
 import os
 import torch
 import sys
+
+logger = logging.getLogger(__name__)
 
 class ThermalMonitor:
     def __init__(self, high_threshold=80.0, resume_threshold=70.0, check_interval_steps=50):
@@ -38,7 +41,7 @@ class ThermalMonitor:
             print(f"ThermalMonitor: Active (Pause > {self.high}°C, Resume < {self.resume}°C)")
 
     def _get_max_temp(self):
-        """Returns the maximum temperature reported by any sensor."""
+        """Returns the maximum temperature reported by any sensor, or None on error."""
         try:
             temps = psutil.sensors_temperatures()
             max_t = 0.0
@@ -47,8 +50,9 @@ class ThermalMonitor:
                     if entry.current > max_t:
                         max_t = entry.current
             return max_t
-        except:
-            return 0.0
+        except Exception as e:
+            logger.warning("ThermalMonitor: Failed to read sensor temperatures: %s", e)
+            return None
 
     def check_and_pause(self, step, model=None, optimizer=None, scheduler=None, save_path=None):
         """
@@ -69,7 +73,15 @@ class ThermalMonitor:
             return
 
         current_temp = self._get_max_temp()
-        
+
+        # If temperature reading failed, log degraded monitoring and proceed
+        if current_temp is None:
+            logger.warning(
+                "ThermalMonitor: Temperature monitoring degraded (sensor read failed). "
+                "Proceeding without thermal protection at step %d.", step
+            )
+            return
+
         # If overheating
         if current_temp >= self.high:
             print(f"\n[THERMAL CRITICAL] System Temp: {current_temp}°C (Threshold: {self.high}°C)")
@@ -94,9 +106,14 @@ class ThermalMonitor:
             while True:
                 time.sleep(10) # Sleep 10s
                 t = self._get_max_temp()
+                if t is None:
+                    sys.stdout.write(f"\r[Cooling] Current: unknown / Resume Target: {self.resume}°C   ")
+                    sys.stdout.flush()
+                    logger.warning("ThermalMonitor: Sensor read failed during cooldown; waiting before retry.")
+                    continue
                 sys.stdout.write(f"\r[Cooling] Current: {t:.1f}°C / Resume Target: {self.resume}°C   ")
                 sys.stdout.flush()
-                
+
                 if t < self.resume:
                     break
             

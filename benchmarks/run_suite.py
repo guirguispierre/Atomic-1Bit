@@ -49,7 +49,7 @@ class MemoryMonitor:
                 rss = process.memory_info().rss
                 if rss > self.peak_rss:
                     self.peak_rss = rss
-            except:
+            except Exception:
                 pass
             time.sleep(self.interval)
 
@@ -205,7 +205,7 @@ def run_benchmarks():
                     results["CPP"]["TPS"] = val
                     print(f"  TPS: {val:.2f}")
                     tps_found = True
-                except:
+                except (ValueError, IndexError):
                     pass
         
         if not tps_found:

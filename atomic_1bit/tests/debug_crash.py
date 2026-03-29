@@ -19,7 +19,7 @@ def debug():
         x = torch.randn(2, 32, 64)
         y = layer(x)
         print(f"BitLinear Output: {y.shape}")
-    except:
+    except Exception:
         traceback.print_exc()
         return
 
@@ -31,7 +31,7 @@ def debug():
         x = torch.randn(2, 32, 64)
         y = attn(x)
         print(f"BitAttention Output: {y.shape}")
-    except:
+    except Exception:
         traceback.print_exc()
         return
 

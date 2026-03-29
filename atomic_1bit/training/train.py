@@ -2,6 +2,8 @@ import sys
 import os
 import glob
 import json
+import argparse
+import yaml
 from collections import Counter
 
 # Add project root to path
@@ -15,15 +17,33 @@ import numpy as np
 from datasets import load_dataset
 from atomic_1bit.model.transformer import AtomicTransformer, AtomicConfig
 
-# --- POCKET STORIES CONFIG ---
-BATCH_SIZE = 32         
-CONTEXT_LEN = 128       
-DIM = 256
-DEPTH = 6 
-HEADS = 4
-VOCAB_SIZE = 4096      
-UNK_ID = VOCAB_SIZE - 1
-LR = 1e-3
+# --- POCKET STORIES CONFIG (defaults, may be overridden by --config) ---
+_parser = argparse.ArgumentParser(add_help=False)
+_parser.add_argument("--config", type=str, default=None)
+_args, _ = _parser.parse_known_args()
+
+_cfg = {}
+_config_path = _args.config or os.path.join(
+    os.path.dirname(__file__), "..", "..", "configs", "stories_base.yaml"
+)
+if os.path.exists(_config_path):
+    with open(_config_path, "r") as _f:
+        _cfg = yaml.safe_load(_f)
+    print(f"[Config] Loaded from {_config_path}")
+else:
+    print(f"[Config] File not found: {_config_path}, using hardcoded defaults")
+
+_model = _cfg.get("model", {})
+_training = _cfg.get("training", {})
+
+BATCH_SIZE  = _training.get("batch_size",      32)
+CONTEXT_LEN = _model.get("context_length",     128)
+DIM         = _model.get("dim",                256)
+DEPTH       = _model.get("depth",              6)
+HEADS       = _model.get("heads",              4)
+VOCAB_SIZE  = _model.get("vocab_size",         4096)
+UNK_ID      = VOCAB_SIZE - 1
+LR          = _training.get("learning_rate",   1e-3)
 
 class PocketStoriesDataset:
     def __init__(self, split="train", context_length=128, vocab_file="weights/vocab_map_stories.json"):
@@ -144,7 +164,7 @@ def generate_demo(model, ds, start_text="Once upon a time"):
             try:
                 word = ds.enc.decode([gpt_id])
                 print(word, end="", flush=True)
-            except:
+            except (UnicodeDecodeError, ValueError, KeyError):
                 pass
             
             x = torch.cat([x, next_token], dim=1)
@@ -177,7 +197,18 @@ def train():
     if os.path.exists(ckpt_path):
         print(f">> Found checkpoint: {ckpt_path}")
         checkpoint = torch.load(ckpt_path, map_location=device)
-        model.load_state_dict(checkpoint["model_state_dict"] if "model_state_dict" in checkpoint else checkpoint)
+        state_dict = checkpoint["model_state_dict"] if "model_state_dict" in checkpoint else checkpoint
+        model_keys = set(model.state_dict().keys())
+        ckpt_keys = set(state_dict.keys())
+        missing = model_keys - ckpt_keys
+        unexpected = ckpt_keys - model_keys
+        if missing:
+            print(f"   Warning: {len(missing)} missing key(s) in checkpoint: {sorted(missing)}")
+        if unexpected:
+            print(f"   Warning: {len(unexpected)} unexpected key(s) in checkpoint: {sorted(unexpected)}")
+        result = model.load_state_dict(state_dict, strict=False)
+        if result.missing_keys or result.unexpected_keys:
+            print(f"   load_state_dict result — missing: {result.missing_keys}, unexpected: {result.unexpected_keys}")
         if "step" in checkpoint: start_step = checkpoint["step"]
 
     print(f"Params: {sum(p.numel() for p in model.parameters())/1e6:.2f}M")
