@@ -56,12 +56,11 @@ class TestThermalMonitorCheck:
             monitor.check_and_pause(step=5)
             mock_get.assert_not_called()
 
-    def test_get_current_temp_returns_float(self):
-        """get_current_temp should return a float."""
+    def test_get_max_temp_returns_float_or_none(self):
+        """_get_max_temp should return a float or None when sensors unavailable."""
         monitor = ThermalMonitor()
-        monitor.enabled = False
-        temp = monitor.get_current_temp()
-        assert isinstance(temp, float)
+        temp = monitor._get_max_temp()
+        assert temp is None or isinstance(temp, float)
 
     def test_max_temp_extraction(self):
         """Should return the maximum temperature across all sensors."""
