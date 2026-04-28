@@ -1,410 +1,230 @@
-# Atomic-1Bit ⚛️
-> *High Intelligence, Low Compute.*
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.8+](https://img.shields.io/badge/Python-3.8%2B-blue.svg)](https://www.python.org/downloads/)
+[![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://isocpp.org/)
+[![BitNet b1.58](https://img.shields.io/badge/Weights-1.58--bit%20Ternary-green.svg)](#how-it-works)
 
-**Atomic-1Bit** is a bare-metal, ultra-lightweight inference engine for **BitNet b1.58** (1.58-bit ternary models).
-It proves that you don't need FP16 matrix multiplication to run modern AI. The core engine runs on **INT8 addition and subtraction** only.
+# Atomic-1Bit
 
-## 🎯 What's New in v1.3
+**Run language models using only addition and subtraction.** Atomic-1Bit is a bare-metal inference engine for 1.58-bit ternary models (BitNet b1.58) that replaces floating-point matrix multiplication with integer add/sub operations, cutting model size by 62% and enabling deployment on devices as small as an ESP32.
 
-- ✅ **Flagship 12.5M Model** (8 layers, 320-dim, 5 heads, 256 context)
-- ✅ **Comprehensive Test Suite** (71 tests with pytest, 100% parity verification)
-- ✅ **Evaluation Harness** (perplexity, repetition, diversity, coherence metrics)
-- ✅ **SIMD Optimization** (2x speedup with NEON/AVX2, dual accumulator pattern)
-- ✅ **KV-Cache Implementation** (autoregressive generation acceleration)
-- ✅ **YAML Config System** (model presets, tokenizer abstraction)
-- ✅ **ESP32 Deployment** (flash-streaming for 520KB SRAM)
-- ✅ **Raspberry Pi Benchmark** (NEON SIMD comparison, thermal monitoring)
-- ✅ **WebAssembly Port** (run models in the browser, no server required)
-- ✅ **Complete Documentation** (805-line ARCHITECTURE.md, CONTRIBUTING.md)
-- ✅ **CI/CD Pipeline** (GitHub Actions with performance regression detection)
+## Why Atomic-1Bit?
 
-## 📊 Benchmarks & Results
+Most LLM inference requires expensive GPU hardware and gigabytes of memory. Even "small" models assume you have a modern GPU or at least a fast CPU with plenty of RAM.
 
-We successfully trained and deployed Atomic-1Bit models ranging from 1.3M to 12.5M parameters. All models verified for **bit-exact parity** between Python and C++ implementations.
+Atomic-1Bit takes a different approach. By quantizing weights to just three values **{-1, 0, 1}**, we eliminate floating-point multiplication entirely:
 
-### Key Achievements
-- **Numerical Parity Verified**: CPU and Metal backends produce **bit-exact** matches to Python reference
-- **Ultra-Low Model Size**: 62% size reduction vs FP16 baselines
-- **Energy Efficiency**: 37-123x lower energy for matrix operations (add/sub only)
-- **Memory Bandwidth**: 8x reduction from ternary weight compression
-- **Cross-Platform**: CPU (NEON/AVX2), Metal (Apple Silicon), CUDA (NVIDIA), WebAssembly
+```
+weight ==  1  ->  accumulator += input
+weight == -1  ->  accumulator -= input
+weight ==  0  ->  skip  (free sparsity)
+```
 
-### Model Variants
+The result is a full transformer that runs on **integer arithmetic only**. No CUDA required. No FP16. No matrix multiply units. Just `add` and `sub` instructions that work on any processor manufactured in the last 30 years.
 
-| Model | Params | Dim | Layers | Heads | Context | Target Device |
-|-------|--------|-----|--------|-------|---------|---------------|
-| **Stories Base** | 1.33M | 128 | 4 | 4 | 64 | Embedded/Testing |
-| **Pocket** | 2.6M | 256 | 4 | 4 | 128 | ESP32, Browser |
-| **Flagship** | 12.5M | 320 | 8 | 5 | 256 | Desktop, RPi |
+**This matters because:**
+- A 1.33M parameter model drops from **5.3 MB to 2.0 MB** (-62%)
+- The C++ runtime has **zero external dependencies** -- it's a single binary
+- It runs on a **Raspberry Pi**, an **ESP32**, or a **2015 laptop**
+- The Python training stack and C++ inference engine produce **bit-exact identical output**
 
-### Performance Comparison (Apple M-series CPU)
+> This is experimental research software. It works, it's verified, and it's honest about what it is: a proof that useful AI inference doesn't require expensive hardware.
 
-**Context**: Sequence Length=128, Gen Tokens=50, Batch Size=1, Single Thread.
+---
 
-| Metric | FP16 Baseline | Atomic-1Bit | Delta |
-| :--- | :--- | :--- | :--- |
+## Performance
+
+Benchmarked on Apple M-series, single thread, sequence length 128, 50 generated tokens:
+
+| Metric | FP16 Baseline | Atomic-1Bit | Improvement |
+|:---|:---|:---|:---|
 | **Model Size** | 5.3 MB | **2.0 MB** | **-62%** |
-| **Parameters** | 1.33M | 1.33M | 0% |
-| **Precision** | Float16 | Ternary {-1, 0, 1} | - |
-| **Speed (Python)** | ~826 TPS | ~130 TPS | -83% (Research Stack) |
-| **Speed (C++ CPU)**| N/A | **~160-170 TPS** | **Portable Runtime** |
-| **Speed (Metal)**| N/A | **~TBD TPS** | **Apple Silicon Optimized** |
-| **Speed (CUDA)**| N/A | **~TBD TPS** | **NVIDIA GPU Optimized** |
+| **Parameters** | 1.33M | 1.33M | Same |
+| **Precision** | Float16 | Ternary {-1, 0, 1} | -- |
+| **Throughput (C++)** | N/A | **~160-170 TPS** | Portable runtime |
+| **Throughput (Python)** | ~826 TPS | ~130 TPS | Unoptimized |
 
-**Visual Summary**
+<details>
+<summary>Visual benchmarks</summary>
 
-![Performance Chart](assets/chart_model_size.png)
-![Speed Chart](assets/chart_speed.png)
+![Model Size Comparison](assets/chart_model_size.png)
+![Speed Comparison](assets/chart_speed.png)
 ![Text Samples](assets/text_samples_comparison.png)
 
-*Note: Benchmarks reflect single-core CPU performance. SIMD kernels optimized for memory bandwidth efficiency.*
+</details>
 
 ---
 
-## 🚀 The Stack
-
-### 1. Research Stack (Python/PyTorch)
-Located in `atomic_1bit/`.
-- **Purpose**: Architecture design, training, and evaluation.
-- **Components**: `BitLinear`, `AtomicTransformer`, `GistEncoder`.
-- **Training**: TinyStories, Alpaca instruction tuning, with thermal safety monitoring.
-- **Evaluation**: Comprehensive metrics (perplexity, repetition, diversity, coherence).
-
-### 2. Bare Metal Stack (C++)
-Located in `embedded/` and `atomic_1bit/core/`.
-- **Purpose**: Deployment on constrained devices and high-performance hardware.
-- **Structure**: Modular backend architecture (`backends/`) supporting CPU, Metal, and CUDA.
-- **Components**: `atomic_lib.h`, `cpu_kernel.cpp`, `metal_kernel.mm`, `cuda_kernel.cu`.
-- **Optimization**: SIMD vectorization (NEON, AVX2), KV-cache, aligned memory layouts.
-
-### 3. Deployment Platforms
-**ESP32** (`embedded/platforms/esp32/`)
-- Flash-streaming for 520KB SRAM constraint
-- PSRAM support for embeddings
-- PlatformIO configuration
-
-**Raspberry Pi** (`benchmarks/platforms/rpi/`)
-- NEON SIMD benchmark suite
-- Thermal monitoring and TPS measurement
-- Target: >10 TPS for real-time inference
-
-**WebAssembly** (`embedded/platforms/wasm/`)
-- Browser-based inference (no server)
-- Interactive demo with file picker
-- ~7MB memory footprint
-
-### 4. Evaluation & Benchmarking
-Located in `benchmarks/` and `atomic_1bit/evaluation/`.
-- **Performance**: Reproducible FP16 vs Atomic-1Bit comparisons
-- **Quality**: Perplexity, repetition rate, diversity metrics
-- **Platform**: Cross-device benchmarks (desktop, RPi, ESP32)
-
----
-
-## ⚡ Quick Start
+## Quick Start
 
 ### Prerequisites
+
+- Python 3.8+
+- GCC/G++ or Clang (for C++ inference, C++17 support required)
+- macOS (Apple Silicon recommended) or Linux
+
+### Install
+
 ```bash
-# Install Python dependencies
+git clone https://github.com/guirguispierre/Atomic-1Bit.git
+cd Atomic-1Bit
 pip install -r requirements.txt
-
-# Or manually:
-pip install torch tiktoken datasets numpy matplotlib psutil tqdm pyyaml
-
-# C++ compiler (GCC/Clang with C++17 support)
-# For Metal: Xcode Command Line Tools
-# For CUDA: NVIDIA CUDA Toolkit
 ```
 
-### 1. Run Tests
-Verify the entire system with the comprehensive test suite:
+### Verify the kernel works
+
+This confirms the C++ ternary kernel matches the Python/NumPy reference exactly:
+
 ```bash
-# Run all 71 tests (includes parity verification)
-pytest tests/ -v
-
-# Run only parity tests
-pytest tests/test_kernel_parity.py -v
-
-# Quick parity check
 python3 atomic_1bit/python/inference.py
+# Expected: ">> SUCCESS: Kernel Output Matches Reference."
 ```
 
-### 2. Build C++ Kernel
+### Train a model
+
 ```bash
-cd atomic_1bit/core
-
-# CPU backend (default)
-make
-
-# Metal backend (Apple Silicon)
-make BACKEND=METAL
-
-# CUDA backend (NVIDIA)
-make BACKEND=CUDA
-
-cd ../..
-```
-
-### 3. Train a Model
-```bash
-# Train base model on TinyStories
+# Train on TinyStories dataset (~15k steps)
 python3 atomic_1bit/training/train.py
-
-# Train Pocket model (4096 vocab, embedded-optimized)
-python3 atomic_1bit/training/train_pocket.py
-
-# Train flagship 12.5M instruct model
-python3 atomic_1bit/training/train_instruct.py
 ```
 
-Training includes automatic thermal safety monitoring (auto-pause >80°C, resume <70°C).
+### Export and run on bare metal
 
-### 4. Evaluate Quality
 ```bash
-# Run full evaluation suite
-python3 atomic_1bit/evaluation/run_eval.py \
-  --model weights/stories_final.pt \
-  --output eval_results.json
-
-# Check perplexity only
-python3 atomic_1bit/evaluation/perplexity.py weights/stories_final.pt
-```
-
-### 5. Export for Deployment
-```bash
-# Export to binary format for C++ runtime
+# Export trained model to binary
 python3 atomic_1bit/utils/export_to_cpp.py \
   --model weights/stories_final.pt \
   --output embedded/atomic_model.bin \
   --dim 256 --depth 6 --heads 4 --vocab_size 4096 --context_len 128
 
-# Compile and run
+# Compile the C++ engine
 cd embedded
 g++ -O3 -std=c++17 atomic_runner.cpp -o runner
-./runner --model atomic_model.bin --steps 100 --temp 0.7 --seed 42
+
+# Generate text
+./runner --model atomic_model.bin --steps 100 --temp 0.7 --seed 42 --start_token 58
 ```
 
-### 6. Deploy to Platforms
-
-**WebAssembly (Browser)**
-```bash
-cd embedded/platforms/wasm
-make  # Requires Emscripten SDK
-make serve  # Start HTTP server
-# Open http://localhost:8080/index.html
-```
-
-**ESP32 (Microcontroller)**
-```bash
-cd embedded/platforms/esp32
-# See README.md for PlatformIO setup
-pio run -t upload
-```
-
-**Raspberry Pi (Benchmark)**
-```bash
-python3 benchmarks/platforms/rpi/benchmark_rpi.py \
-  --model weights/pocket_final.pt \
-  --bin embedded/atomic_model.bin \
-  --steps 100
-```
+See [docs/COMMANDS.md](docs/COMMANDS.md) for the full command reference and [docs/INSTALL.md](docs/INSTALL.md) for detailed installation instructions.
 
 ---
 
-## 🧠 Theory: "The Magic Kernel"
+## How It Works
 
-The heart of Atomic-1Bit is `ternary_matmul`. Instead of expensive multiplication, we use:
-```cpp
-if (weight == 1)  acc += input;   // 1 add operation
-if (weight == -1) acc -= input;   // 1 sub operation
-// if weight == 0, do nothing (Sparsity!)
-```
+Atomic-1Bit implements a standard transformer architecture (embeddings, multi-head attention, feed-forward layers) with one critical difference: every linear layer uses **BitLinear** instead of `nn.Linear`.
 
-**Why This Works:**
-- **37-123x Energy Savings**: Add/sub consumes far less energy than multiply
-- **8x Memory Bandwidth**: Ternary weights compress 4:1 vs INT8
-- **Hardware-Friendly**: SIMD vectorization for 64 elements per cycle
-- **Gradient Flow**: Straight-Through Estimator (STE) enables backpropagation
+During training, weights are quantized to {-1, 0, 1} using a straight-through estimator (STE), which lets gradients flow through the discrete quantization step. Activations are quantized to INT8. At inference time, the entire forward pass reduces to integer additions and subtractions.
 
-**Gist Tokens** (Thought Compression):
-Pre-compute system prompts into a single vector. Inject at attention level with **zero inference cost**.
+The project has three components:
 
-![Gist Flow](assets/diagram_gist_flow_1765658121862.png)
+1. **Research stack** (`atomic_1bit/`) -- PyTorch training, evaluation, and model architecture. Train on TinyStories or Alpaca-cleaned datasets with thermal safety monitoring, gradient accumulation, and cosine scheduling.
 
-For deep technical details, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+2. **Bare-metal runtime** (`embedded/`) -- Standalone C++ inference engine with zero dependencies. Supports CPU, Metal (Apple Silicon), and CUDA backends through conditional compilation. Produces bit-exact output matching the Python reference.
+
+3. **Gist tokens** -- Pre-computed "thought vectors" that compress a system prompt into a single embedding, injected into the attention stream at zero inference cost.
+
+![Ternary Matmul Diagram](assets/diagram_ternary_matmul_1765658104682.png)
+
+For more details, see [docs/USAGE.md](docs/USAGE.md).
 
 ---
 
-## 🔥 Features
-
-### Thermal Safety
-Long-running training includes automatic thermal protection:
-- **Auto-Pause**: If system temp > 80°C
-- **Auto-Resume**: When temp < 70°C
-- **Safety Checkpoint**: Saves `*_thermal_safe.pt` before pausing
-
-*Note: On Apple Silicon, sensor access may require elevated permissions. The monitor gracefully disables if sensors are unavailable.*
-
-### KV-Cache Optimization
-Autoregressive generation with key-value caching:
-```python
-# Use cache for faster generation
-output = model.generate(prompt, max_new_tokens=100, use_cache=True)
-```
-
-### YAML Configuration
-Define model presets in `configs/`:
-```yaml
-model:
-  name: "atomic-12.5M"
-  dim: 320
-  depth: 8
-  heads: 5
-  context_length: 256
-  vocab_size: 50257
-
-quantization:
-  weight_bits: 1.58
-  activation_bits: 8
-```
-
-### Modular Tokenizers
-Tokenizer abstraction for different vocabularies:
-- `TiktokenWrapper`: GPT-2 (50257 vocab)
-- `PocketTokenizer`: Frequency-filtered (4096 vocab)
-- Extensible for custom tokenizers
-
----
-
-## 📚 Documentation
-
-- **[CLAUDE.md](CLAUDE.md)** - Project overview and command reference
-- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** - Deep dive into BitNet b1.58, STE, ATOM format, kernel design
-- **[CONTRIBUTING.md](CONTRIBUTING.md)** - Development setup, testing, PR guidelines
-- **[ROADMAP.md](ROADMAP.md)** - Version history and future plans
-
----
-
-## 🧪 Testing & CI/CD
-
-### Test Suite (71 Tests)
-```bash
-pytest tests/ -v
-```
-
-Coverage:
-- BitLinear layer: quantization, STE gradients, edge cases
-- Transformer: forward pass, KV-cache, gist injection
-- Export/Import: ATOM format round-trip
-- Kernel Parity: 9 critical tests (bit-exact verification)
-- Thermal Monitor: auto-pause/resume behavior
-
-### Pre-Commit Hooks
-```bash
-# Install hooks
-pre-commit install
-
-# Enforces:
-# - black (formatting)
-# - isort (import ordering)
-# - flake8 (linting)
-# - parity check (on kernel changes)
-```
-
-### GitHub Actions CI
-Automated testing on every push/PR:
-- Build C++ kernel (CPU backend)
-- Run pytest suite
-- Verify kernel parity
-- Lint code (black, flake8, isort)
-- Benchmark performance (regression detection)
-
-See [.github/workflows/ci.yml](.github/workflows/ci.yml).
-
----
-
-## 🌐 Community
-
-### Contributing
-We welcome contributions! Please read [CONTRIBUTING.md](CONTRIBUTING.md) for:
-- Development environment setup
-- Code style guidelines
-- Testing requirements (parity verification is mandatory)
-- PR checklist
-
-### Code of Conduct
-- **Correctness before speed**
-- **Parity before optimization**
-- **Measured claims only**
-- **Deployment-focused research**
-
----
-
-## 📦 Repository Structure
+## Project Structure
 
 ```
 atomic_1bit/
-├── nn/                  # BitLinear layer, quantization
-├── model/               # AtomicTransformer, GistEncoder
-├── training/            # Training scripts (base, pocket, instruct)
-├── evaluation/          # Quality metrics (PPL, repetition, diversity)
-├── python/              # Python inference wrapper, chat interface
-├── utils/               # Export tools, thermal monitor
-└── core/                # C++ kernel source
-    ├── Makefile         # Build system (BACKEND=CPU/METAL/CUDA)
-    └── backends/        # Backend implementations
-
-embedded/
-├── atomic_lib.h         # Header-only C++ inference library
-├── atomic_runner.cpp    # Standalone binary
-└── platforms/           # Platform-specific demos
-    ├── esp32/           # ESP32 microcontroller
-    ├── rpi/             # Raspberry Pi 4
-    └── wasm/            # WebAssembly browser demo
-
-benchmarks/              # Performance evaluation
-├── run_suite.py         # Main benchmark script
-└── platforms/           # Platform-specific benchmarks
-
-tests/                   # Pytest test suite (71 tests)
-configs/                 # YAML model presets
-docs/                    # Architecture documentation
-tools/                   # Parity checks, utilities
-weights/                 # Trained model checkpoints
+  model/          Transformer architecture (BitLinear, BitAttention)
+  nn/             Core layers (BitLinear with STE quantization)
+  training/       Training scripts (TinyStories, Alpaca, Pocket)
+  evaluation/     Quality metrics (perplexity, coherence, diversity)
+  python/         Python inference, chat interface, kernel wrapper
+  utils/          Export, gist generation, thermal monitoring
+  core/           C++ kernels (CPU, Metal, CUDA backends)
+  tokenizers/     Tokenizer abstraction layer
+  config.py       YAML/JSON configuration system
+embedded/         Standalone C++ runner + ESP32 port guide
+configs/          Model presets (4K pocket to 12.5M flagship)
+benchmarks/       Reproducible benchmark suite vs FP16 baselines
+tests/            67 pytest tests for correctness verification
+scripts/          Plotting, evaluation, and reproduction scripts
+docs/             Installation, usage, commands, benchmarking guides
+examples/         Runnable example scripts
 ```
 
 ---
 
-## 🎓 Research Context
+## Model Configurations
 
-Atomic-1Bit is based on **BitNet b1.58** (Microsoft Research, 2024), which introduced 1.58-bit ternary quantization for language models. This project provides:
+| Config | Parameters | Dimensions | Use Case |
+|:---|:---|:---|:---|
+| [`pocket_4k`](configs/pocket_4k.yaml) | ~100K | 256d, 4L, 4H | ESP32 / microcontrollers |
+| [`stories_base`](configs/stories_base.yaml) | ~1.33M | 256d, 6L, 4H | Development / testing |
+| [`flagship_12m`](configs/flagship_12m.yaml) | ~12.5M | 320d, 8L, 5H | Quality demos |
+| [`mixed_precision`](configs/mixed_precision.yaml) | Configurable | Hybrid 1.58/4-bit | Experimental |
 
-1. **End-to-End Implementation**: Training, evaluation, export, deployment
-2. **Parity-Verified Runtime**: Bit-exact C++ inference
-3. **Real Hardware Targets**: ESP32, Raspberry Pi, WebAssembly
-4. **Comprehensive Documentation**: Theory and practice
+Load any config with:
 
-For the mathematical foundations and design rationale, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
-
----
-
-## 📄 License
-
-MIT License - See [LICENSE](LICENSE) for details.
-
-**Concept**: BitNet b1.58 (Microsoft Research)
-**Implementation**: Atomic-1Bit (Pierre Guirguis)
+```python
+from atomic_1bit.config import load_config, config_to_atomic
+config = config_to_atomic(load_config("configs/stories_base.yaml"))
+```
 
 ---
 
-## 🚀 What's Next?
+## Requirements
 
-See [ROADMAP.md](ROADMAP.md) for planned features:
-- v1.4: Higher quality flagship model (target PPL <50)
-- v2.0: Mixed-precision support (2-bit, 4-bit hybrid)
-- v2.1: Mobile deployment demos (Android, iOS)
-- v3.0: FPGA/ASIC exploration
+| Dependency | Version | Purpose |
+|:---|:---|:---|
+| Python | 3.8+ | Training and evaluation |
+| PyTorch | >= 1.13.0 | Model training |
+| tiktoken | >= 0.5.0 | Tokenization |
+| datasets | >= 2.14.0 | HuggingFace datasets |
+| NumPy | >= 1.24.0 | Reference math |
+| matplotlib | >= 3.7.0 | Benchmark plots |
+| psutil | >= 5.9.0 | Thermal monitoring |
+| tqdm | >= 4.65.0 | Progress bars |
+| PyYAML | >= 6.0 | Config files |
+| GCC/Clang | C++17 | C++ inference engine |
+
+**Hardware**: Any machine with a CPU. Apple Silicon recommended for Metal backend. NVIDIA GPU optional for CUDA backend. Tested down to ESP32-S3 for embedded inference.
 
 ---
 
-*Built with ⚛️ by the Atomic-1Bit project. High intelligence, low compute.*
+## Running Tests
+
+```bash
+# Run the full test suite
+pytest tests/ -v
+
+# Run specific test modules
+pytest tests/test_bitlinear.py -v
+pytest tests/test_kernel_parity.py -v
+```
+
+---
+
+## Contributing
+
+We welcome contributions. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on submitting issues, pull requests, and code style expectations.
+
+---
+
+## Roadmap
+
+See [ROADMAP.md](ROADMAP.md) for the full development plan.
+
+- **v1.0** -- Parity-verified ternary inference (done)
+- **v1.2** -- Hardware-native backends: Metal, CUDA (done)
+- **v1.3** -- Model scaling, evaluation harness, 12.5M config (done)
+- **v2.0** -- YAML configs, tokenizer abstraction, model presets (done)
+- **Next** -- SIMD acceleration (AVX2/NEON), mobile demos, mixed-precision training
+
+---
+
+## License
+
+MIT License. See [LICENSE](LICENSE) for details.
+
+## Contact
+
+- **Author**: [@guirguispierre](https://github.com/guirguispierre)
+- **Issues**: [GitHub Issues](https://github.com/guirguispierre/Atomic-1Bit/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/guirguispierre/Atomic-1Bit/discussions)
