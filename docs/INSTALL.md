@@ -52,14 +52,14 @@ g++ -O3 -std=c++17 atomic_runner.cpp -o runner
 
 ```bash
 cd atomic_1bit/core
-make metal
+make BACKEND=METAL
 ```
 
 ### Build with CUDA backend (NVIDIA GPU)
 
 ```bash
 cd atomic_1bit/core
-make cuda
+make BACKEND=CUDA
 ```
 
 ### Verify the build

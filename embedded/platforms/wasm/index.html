@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Atomic-1Bit: Browser Inference</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+            background: #0a0a0a;
+            color: #e0e0e0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-height: 100vh;
+            padding: 2rem;
+        }
+        h1 {
+            color: #4fc3f7;
+            font-size: 1.5rem;
+            margin-bottom: 0.5rem;
+        }
+        .subtitle {
+            color: #888;
+            font-size: 0.85rem;
+            margin-bottom: 2rem;
+        }
+        .container {
+            width: 100%;
+            max-width: 700px;
+        }
+        .controls {
+            display: flex;
+            gap: 0.5rem;
+            margin-bottom: 1rem;
+            flex-wrap: wrap;
+        }
+        .controls label {
+            color: #aaa;
+            font-size: 0.8rem;
+        }
+        .controls input[type="file"] {
+            display: none;
+        }
+        .btn {
+            padding: 0.5rem 1rem;
+            border: 1px solid #333;
+            background: #1a1a1a;
+            color: #4fc3f7;
+            cursor: pointer;
+            border-radius: 4px;
+            font-family: inherit;
+            font-size: 0.85rem;
+            transition: background 0.2s;
+        }
+        .btn:hover { background: #252525; }
+        .btn:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+        .btn.primary {
+            background: #1565c0;
+            border-color: #1976d2;
+            color: #fff;
+        }
+        .btn.primary:hover { background: #1976d2; }
+        .param {
+            display: flex;
+            align-items: center;
+            gap: 0.3rem;
+        }
+        .param input {
+            width: 60px;
+            padding: 0.4rem;
+            background: #1a1a1a;
+            border: 1px solid #333;
+            color: #e0e0e0;
+            border-radius: 4px;
+            font-family: inherit;
+            text-align: center;
+        }
+        #output {
+            background: #111;
+            border: 1px solid #222;
+            border-radius: 6px;
+            padding: 1.5rem;
+            min-height: 200px;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            line-height: 1.6;
+            font-size: 0.95rem;
+        }
+        #output .token {
+            color: #81c784;
+        }
+        #status {
+            margin-top: 1rem;
+            font-size: 0.8rem;
+            color: #666;
+        }
+        #stats {
+            margin-top: 0.5rem;
+            font-size: 0.8rem;
+            color: #888;
+            display: flex;
+            gap: 1.5rem;
+        }
+        .stat-val { color: #4fc3f7; }
+    </style>
+</head>
+<body>
+    <h1>Atomic-1Bit</h1>
+    <p class="subtitle">Ternary language model inference in your browser. No server required.</p>
+
+    <div class="container">
+        <div class="controls">
+            <label class="btn" for="model-file">Load .bin Model</label>
+            <input type="file" id="model-file" accept=".bin">
+
+            <button class="btn primary" id="btn-generate" disabled>Generate</button>
+            <button class="btn" id="btn-stop" disabled>Stop</button>
+            <button class="btn" id="btn-clear">Clear</button>
+
+            <div class="param">
+                <label>Tokens:</label>
+                <input type="number" id="max-tokens" value="50" min="1" max="500">
+            </div>
+            <div class="param">
+                <label>Temp:</label>
+                <input type="number" id="temperature" value="0.7" min="0" max="2" step="0.1">
+            </div>
+            <div class="param">
+                <label>Start:</label>
+                <input type="number" id="start-token" value="58" min="0" max="4095">
+            </div>
+        </div>
+
+        <div id="output">Load a .bin model file to begin inference.</div>
+
+        <div id="status"></div>
+        <div id="stats">
+            <div>Tokens: <span class="stat-val" id="stat-tokens">0</span></div>
+            <div>Speed: <span class="stat-val" id="stat-tps">-</span> TPS</div>
+            <div>Model: <span class="stat-val" id="stat-model">not loaded</span></div>
+        </div>
+    </div>
+
+    <script>
+    // Atomic-1Bit WASM Interface
+    let wasmReady = false;
+    let modelLoaded = false;
+    let generating = false;
+    let stopRequested = false;
+
+    // WASM module (loaded via Emscripten)
+    let Module = null;
+    let _init_model, _generate_token, _get_logits, _get_vocab_size;
+    let _reset_context, _free_model;
+
+    const output = document.getElementById('output');
+    const status = document.getElementById('status');
+    const btnGenerate = document.getElementById('btn-generate');
+    const btnStop = document.getElementById('btn-stop');
+    const btnClear = document.getElementById('btn-clear');
+    const modelFile = document.getElementById('model-file');
+
+    function setStatus(msg) {
+        status.textContent = msg;
+    }
+
+    function updateStats(tokens, tps) {
+        document.getElementById('stat-tokens').textContent = tokens;
+        document.getElementById('stat-tps').textContent = tps >= 0 ? tps.toFixed(1) : '-';
+    }
+
+    // Load Emscripten module
+    function loadWasm() {
+        setStatus('Loading WASM runtime...');
+
+        const script = document.createElement('script');
+        script.src = 'atomic.js';
+        script.onload = () => {
+            // Emscripten creates a global Module
+            if (typeof createModule === 'function') {
+                createModule().then(mod => {
+                    Module = mod;
+                    setupWasmFunctions();
+                });
+            } else {
+                // Fallback: Module is already global
+                setStatus('WASM loaded. Load a .bin model to begin.');
+                wasmReady = true;
+            }
+        };
+        script.onerror = () => {
+            setStatus('Error: Could not load atomic.js. Build the WASM module first.');
+        };
+        document.body.appendChild(script);
+    }
+
+    function setupWasmFunctions() {
+        _init_model = Module.cwrap('init_model', 'number', ['number', 'number']);
+        _generate_token = Module.cwrap('generate_token', 'number', ['number']);
+        _get_vocab_size = Module.cwrap('get_vocab_size', 'number', []);
+        _reset_context = Module.cwrap('reset_context', null, []);
+        _free_model = Module.cwrap('free_model', null, []);
+        wasmReady = true;
+        setStatus('WASM ready. Load a .bin model to begin.');
+    }
+
+    // Load model binary
+    modelFile.addEventListener('change', async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        if (!wasmReady) {
+            setStatus('WASM not ready yet. Please wait.');
+            return;
+        }
+
+        setStatus(`Loading model: ${file.name} (${(file.size / 1024 / 1024).toFixed(1)} MB)...`);
+        output.textContent = '';
+
+        try {
+            const buffer = await file.arrayBuffer();
+            const bytes = new Uint8Array(buffer);
+
+            // Verify ATOM magic
+            const magic = bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24);
+            if (magic !== 0x41544F4D) {
+                setStatus('Error: Invalid model file (bad ATOM magic header)');
+                return;
+            }
+
+            // Copy to WASM heap
+            const ptr = Module._malloc(bytes.length);
+            Module.HEAPU8.set(bytes, ptr);
+
+            const result = _init_model(ptr, bytes.length);
+            Module._free(ptr);
+
+            if (result !== 0) {
+                setStatus('Error: Model initialization failed');
+                return;
+            }
+
+            modelLoaded = true;
+            const vocabSize = _get_vocab_size();
+            document.getElementById('stat-model').textContent =
+                `${file.name} (vocab=${vocabSize})`;
+            setStatus('Model loaded. Click Generate to start inference.');
+            btnGenerate.disabled = false;
+            output.textContent = 'Model loaded. Ready to generate.\n';
+        } catch (err) {
+            setStatus(`Error loading model: ${err.message}`);
+        }
+    });
+
+    // Temperature sampling in JS (using logits from WASM)
+    function sampleWithTemp(temperature) {
+        if (temperature < 0.01) {
+            // Greedy (handled in WASM)
+            return -1; // Signal to use WASM greedy
+        }
+
+        const vocabSize = _get_vocab_size();
+        const logitsPtr = Module._get_logits();
+        const logits = new Float32Array(Module.HEAPF32.buffer, logitsPtr, vocabSize);
+
+        // Softmax with temperature
+        let maxVal = -Infinity;
+        for (let i = 0; i < vocabSize; i++) {
+            if (logits[i] > maxVal) maxVal = logits[i];
+        }
+
+        let sumExp = 0;
+        const probs = new Float32Array(vocabSize);
+        for (let i = 0; i < vocabSize; i++) {
+            probs[i] = Math.exp((logits[i] - maxVal) / temperature);
+            sumExp += probs[i];
+        }
+
+        // Sample
+        let r = Math.random() * sumExp;
+        let acc = 0;
+        for (let i = 0; i < vocabSize; i++) {
+            acc += probs[i];
+            if (r <= acc) return i;
+        }
+        return vocabSize - 1;
+    }
+
+    // Generate tokens
+    async function generate() {
+        if (!modelLoaded || generating) return;
+
+        generating = true;
+        stopRequested = false;
+        btnGenerate.disabled = true;
+        btnStop.disabled = false;
+
+        const maxTokens = parseInt(document.getElementById('max-tokens').value) || 50;
+        const temperature = parseFloat(document.getElementById('temperature').value) || 0.0;
+        const startToken = parseInt(document.getElementById('start-token').value) || 58;
+
+        _reset_context();
+        output.textContent = '';
+        setStatus('Generating...');
+
+        let token = startToken;
+        let tokenCount = 0;
+        const startTime = performance.now();
+
+        for (let i = 0; i < maxTokens; i++) {
+            if (stopRequested) break;
+
+            token = _generate_token(token);
+
+            // Temperature sampling (if temp > 0, resample from logits)
+            if (temperature > 0.01) {
+                const sampled = sampleWithTemp(temperature);
+                if (sampled >= 0) token = sampled;
+            }
+
+            tokenCount++;
+            output.textContent += token + ' ';
+
+            const elapsed = (performance.now() - startTime) / 1000;
+            const tps = tokenCount / elapsed;
+            updateStats(tokenCount, tps);
+
+            // Yield to UI every few tokens
+            if (i % 5 === 0) {
+                await new Promise(r => setTimeout(r, 0));
+            }
+        }
+
+        const totalTime = (performance.now() - startTime) / 1000;
+        const finalTps = tokenCount / totalTime;
+        updateStats(tokenCount, finalTps);
+        setStatus(`Done. ${tokenCount} tokens in ${totalTime.toFixed(2)}s (${finalTps.toFixed(1)} TPS)`);
+
+        generating = false;
+        btnGenerate.disabled = false;
+        btnStop.disabled = true;
+    }
+
+    btnGenerate.addEventListener('click', generate);
+    btnStop.addEventListener('click', () => { stopRequested = true; });
+    btnClear.addEventListener('click', () => {
+        output.textContent = modelLoaded ? 'Ready to generate.\n' : 'Load a .bin model to begin.';
+        updateStats(0, -1);
+        if (modelLoaded) _reset_context();
+    });
+
+    // Try to load WASM on page load
+    loadWasm();
+    </script>
+</body>
+</html>

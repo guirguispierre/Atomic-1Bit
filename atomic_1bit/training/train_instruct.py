@@ -3,6 +3,8 @@ import os
 import glob
 import json
 import math
+import argparse
+import yaml
 from collections import Counter
 
 # Add project root to path
@@ -20,22 +22,40 @@ import csv
 import time
 from atomic_1bit.utils.thermal import ThermalMonitor
 
-# --- EFFICIENT INSTRUCT CONFIG (v1.3) ---
+# --- EFFICIENT INSTRUCT CONFIG (v1.3, defaults may be overridden by --config) ---
 # "Flagship" 12.5M Parameter Model.
 # High Quality, Low RAM.
-BATCH_SIZE = 32         # Physical batch size
-GRAD_ACCUM_STEPS = 8    # Effective batch = 32 * 8 = 256 (scaled up from 4)
-CONTEXT_LEN = 256       # Standard for Instructions
-DIM = 320               # Sweet Spot
-DEPTH = 8
-HEADS = 5               # 320/5 = 64
-VOCAB_SIZE = 4096       # Compressed
-UNK_ID = VOCAB_SIZE - 1
-LR = 3e-4               # Scaled for larger effective batch (was 6e-4 with eff=128)
-WARMUP_STEPS = 1000     # 5% of 20k steps (increased from 500)
-CLIP_GRAD = 1.0         # Gradient Clipping Threshold
-WEIGHT_DECAY = 0.1      # AdamW weight decay for non-norm parameters
-DROPOUT = 0.0           # Configurable dropout (set >0 to experiment)
+_parser = argparse.ArgumentParser(add_help=False)
+_parser.add_argument("--config", type=str, default=None)
+_args, _ = _parser.parse_known_args()
+
+_cfg = {}
+_config_path = _args.config or os.path.join(
+    os.path.dirname(__file__), "..", "..", "configs", "flagship_12m.yaml"
+)
+if os.path.exists(_config_path):
+    with open(_config_path, "r") as _f:
+        _cfg = yaml.safe_load(_f)
+    print(f"[Config] Loaded from {_config_path}")
+else:
+    print(f"[Config] File not found: {_config_path}, using hardcoded defaults")
+
+_model = _cfg.get("model", {})
+_training = _cfg.get("training", {})
+
+BATCH_SIZE       = _training.get("batch_size",       32)       # Physical batch size
+GRAD_ACCUM_STEPS = _training.get("grad_accum_steps", 8)        # Effective batch = 32 * 8 = 256
+CONTEXT_LEN      = _model.get("context_length",      256)      # Standard for Instructions
+DIM              = _model.get("dim",                  320)      # Sweet Spot
+DEPTH            = _model.get("depth",                8)
+HEADS            = _model.get("heads",                5)        # 320/5 = 64
+VOCAB_SIZE       = _model.get("vocab_size",           4096)     # Compressed
+UNK_ID           = VOCAB_SIZE - 1
+LR               = _training.get("learning_rate",     3e-4)    # Scaled for larger effective batch
+WARMUP_STEPS     = _training.get("warmup_steps",      1000)    # 5% of 20k steps
+CLIP_GRAD        = _training.get("clip_grad",         1.0)     # Gradient Clipping Threshold
+WEIGHT_DECAY     = _training.get("weight_decay",      0.1)     # AdamW weight decay for non-norm parameters
+DROPOUT          = 0.0                                          # Configurable dropout (set >0 to experiment)
 
 class EfficientInstructDataset:
     def __init__(self, split="train", context_length=256, vocab_file="weights/vocab_map_instruct.json"):
@@ -178,7 +198,7 @@ def generate_demo(model, ds, instruction="Count to 5."):
             try:
                 word = ds.enc.decode([gpt_id])
                 print(word, end="", flush=True)
-            except:
+            except (UnicodeDecodeError, ValueError, KeyError):
                 pass
 
             x = torch.cat([x, next_token], dim=1)
@@ -248,7 +268,18 @@ def train():
         print(f">> Found checkpoint: {ckpt_path}")
         checkpoint = torch.load(ckpt_path, map_location=device)
         if "model_state_dict" in checkpoint:
-            model.load_state_dict(checkpoint["model_state_dict"])
+            state_dict = checkpoint["model_state_dict"]
+            model_keys = set(model.state_dict().keys())
+            ckpt_keys = set(state_dict.keys())
+            missing = model_keys - ckpt_keys
+            unexpected = ckpt_keys - model_keys
+            if missing:
+                print(f"   Warning: {len(missing)} missing key(s) in checkpoint: {sorted(missing)}")
+            if unexpected:
+                print(f"   Warning: {len(unexpected)} unexpected key(s) in checkpoint: {sorted(unexpected)}")
+            result = model.load_state_dict(state_dict, strict=False)
+            if result.missing_keys or result.unexpected_keys:
+                print(f"   load_state_dict result — missing: {result.missing_keys}, unexpected: {result.unexpected_keys}")
             if "step" in checkpoint:
                 start_step = checkpoint["step"]
                 print(f"   Resuming from STEP {start_step}")
@@ -256,7 +287,7 @@ def train():
                 try:
                     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
                     print("   Optimizer state restored.")
-                except:
+                except Exception:
                     print("   Warning: Could not load optimizer state")
             if "rng_state" in checkpoint:
                 torch.set_rng_state(checkpoint["rng_state"])
@@ -264,7 +295,18 @@ def train():
                     np.random.set_state(checkpoint["np_rng_state"])
                 print("   RNG state restored.")
         else:
-            model.load_state_dict(checkpoint)
+            state_dict = checkpoint
+            model_keys = set(model.state_dict().keys())
+            ckpt_keys = set(state_dict.keys())
+            missing = model_keys - ckpt_keys
+            unexpected = ckpt_keys - model_keys
+            if missing:
+                print(f"   Warning: {len(missing)} missing key(s) in checkpoint: {sorted(missing)}")
+            if unexpected:
+                print(f"   Warning: {len(unexpected)} unexpected key(s) in checkpoint: {sorted(unexpected)}")
+            result = model.load_state_dict(state_dict, strict=False)
+            if result.missing_keys or result.unexpected_keys:
+                print(f"   load_state_dict result — missing: {result.missing_keys}, unexpected: {result.unexpected_keys}")
     else:
         print(">> Starting Fresh Model")
         init_weights(model)
@@ -298,7 +340,7 @@ def train():
                 try:
                     scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
                     print("   Scheduler state restored.")
-                except:
+                except Exception:
                     print("   Warning: Could not restore scheduler, using re-computed state.")
 
     print(f"Training from {start_step} to {total_steps_target} (Grad Accum: {GRAD_ACCUM_STEPS}, Eff Batch: {BATCH_SIZE * GRAD_ACCUM_STEPS})...")

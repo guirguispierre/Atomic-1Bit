@@ -73,7 +73,7 @@ def evaluate_generation(model, ds, device, prompt="What is AI?"):
             try:
                 word = ds.enc.decode([gpt_id])
                 generated_text += word
-            except:
+            except (UnicodeDecodeError, ValueError, KeyError):
                 pass
             
             x = torch.cat([x, next_token], dim=1)

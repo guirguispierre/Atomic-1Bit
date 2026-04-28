@@ -3,177 +3,124 @@
 #include <stdint.h>
 #include <stdio.h>
 
+// Tile size for shared-memory tiled matrix multiplication.
+// Each thread block is TILE_SIZE x TILE_SIZE threads and processes a
+// TILE_SIZE x TILE_SIZE sub-tile of the output matrix C per iteration.
+// 16 gives 256 threads per block, which maps well to warp granularity (32
+// threads/warp -> 8 warps/block) and fits shared memory constraints.
 #define TILE_SIZE 16
 
-// CUDA Kernel: Tiled Matrix Multiplication
-// A: (M, K)
-// B: (N, K) transposed -> stored as (N, K) naturally
-// C: (M, N)
+// ---------------------------------------------------------------------------
+// ternary_matmul_kernel
 //
-// We want C[i, j] = sum(A[i, k] * B[j, k]) over k.
-// B is (N, K), so row j of C corresponds to row j of B.
-// This is actually: C = A * B^T
+// Purpose:
+//   Computes C = A * B^T using tiled shared-memory matrix multiplication,
+//   where A and B contain ternary (int8) values.  The operation is:
+//     C[i, j] = sum_k  A[i, k] * B[j, k]
+//   which is equivalent to C = A * B^T when B is stored row-major as (N, K).
 //
-// Grid: (ceil(N/TILE), ceil(M/TILE))
-// Block: (TILE, TILE)
+// Parameters:
+//   A   - Input activation matrix, shape (M, K), row-major int8.
+//         Typically a batch of quantized INT8 activations.
+//   B   - Weight matrix stored as (N, K), row-major int8, values in {-1, 0, 1}.
+//         This is the ternary weight matrix already transposed for efficient
+//         dot-product access (each row of B is one output neuron's weights).
+//   C   - Output accumulation matrix, shape (M, N), row-major int32.
+//         The caller must allocate this buffer before the kernel launches.
+//   M   - Number of rows in A (batch dimension / sequence positions).
+//   N   - Number of rows in B (output feature dimension).
+//   K   - Shared inner dimension (input feature dimension).
+//
+// Launch configuration:
+//   Grid:  (ceil(N / TILE_SIZE), ceil(M / TILE_SIZE))
+//            -> grid.x covers the N (output) dimension
+//            -> grid.y covers the M (batch/row) dimension
+//   Block: (TILE_SIZE, TILE_SIZE)  =  16 x 16 = 256 threads per block
+//            -> threadIdx.x covers columns (K-tile index and output column)
+//            -> threadIdx.y covers rows    (K-tile index and output row)
+//
+// Shared memory:
+//   As[TILE_SIZE][TILE_SIZE] - Tile of A loaded cooperatively by the block.
+//                               As[ty][tx] = A[row, k_tile_start + tx]
+//   Bs[TILE_SIZE][TILE_SIZE] - Tile of B loaded cooperatively by the block.
+//                               Bs[tx][ty] = B[col, k_tile_start + ty]
+//                               (Transposed load into shared memory so the
+//                               inner-loop access Bs[tx][p] is coalesced for
+//                               all threads sharing the same tx value.)
+//
+// Thread/block mapping:
+//   Each thread (tx, ty) in block (bx, by) is responsible for one output
+//   element: C[by*TILE + ty, bx*TILE + tx].  The thread accumulates its
+//   partial dot product across all K-tiles into the register variable 'val'
+//   and writes the result to global memory after all tiles are processed.
+//
+// Synchronization:
+//   __syncthreads() is called twice per K-tile:
+//     1. After loading As and Bs to ensure all threads see the complete tile
+//        before the inner product loop begins.
+//     2. After the inner product loop to prevent any thread from overwriting
+//        the shared tile before every thread has finished reading it.
+// ---------------------------------------------------------------------------
 __global__ void ternary_matmul_kernel(const int8_t *A, const int8_t *B,
                                       int32_t *C, int M, int N, int K) {
+  // Global column and row indices for the output element this thread computes.
   int bx = blockIdx.x;
   int by = blockIdx.y;
   int tx = threadIdx.x;
   int ty = threadIdx.y;
 
-  // Row and Col for C
+  // Row in A (and C) that this thread is responsible for.
   int row = by * TILE_SIZE + ty;
+  // Column in C (and row in B, since B is transposed) for this thread.
   int col = bx * TILE_SIZE + tx;
 
+  // Running int32 accumulator for the dot product C[row, col].
+  // Using int32 prevents overflow when accumulating up to K int8*int8 products.
   int32_t val = 0;
 
-  // Shared memory for tiles
-  // dim A: M x K
-  // dim B: N x K
-  // Tile A: (TILE, TILE) -> subsection of A
-  // Tile B: (TILE, TILE) -> subsection of B
-  // Loop over K in steps of TILE_SIZE
+  // Shared memory tiles.
+  // As[ty][tx]: one TILE_SIZE x TILE_SIZE slice of A for the current K-tile.
+  // Bs[tx][ty]: one TILE_SIZE x TILE_SIZE slice of B for the current K-tile,
+  //             stored transposed to make the accumulation loop access
+  //             Bs[tx][p] with tx fixed per thread (no bank conflicts on p).
   __shared__ int8_t As[TILE_SIZE][TILE_SIZE];
   __shared__ int8_t Bs[TILE_SIZE][TILE_SIZE];
 
+  // Iterate over K in steps of TILE_SIZE, loading and processing one tile at
+  // a time.  ceil(K / TILE_SIZE) iterations handle non-multiples of TILE_SIZE
+  // via boundary guards below.
   for (int k = 0; k < (K + TILE_SIZE - 1) / TILE_SIZE; ++k) {
 
-    // Load A tile
-    // A element: [row, k * TILE + tx]
-    // Guard boundaries
-    int k_idx = k * TILE_SIZE + tx;
-    if (row < M && k_idx < K)
-      As[ty][tx] = A[row * K + k_idx];
-    else
-      As[ty][tx] = 0;
-
-    // Load B tile
-    // B element: [col, k * TILE + ty]
-    // Note: B is (N, K). We need row 'col' of B, and column 'p' of B?
-    // Wait, C[row, col] = dot(A_row, B_col_of_transpose) = dot(A_row,
-    // B_row_of_original). Since B is passed as (N, K), it IS B_transposed
-    // relative to math A*B. So we need dot(A[row, :], B[col, :]).
-    //
-    // Loading B:
-    // We want B[col, current_k].
-    // inside tile:
-    // B tile needs to provide values for the dot product phase.
-    // Dot product is over 'k'.
-    // Thread (ty, tx) computes C[row, col].
-    // We accumulate over k.
-    // So we need A[row, k] and B[col, k].
-    //
-    // In shared memory:
-    // As[ty][t_k] -> A element for this thread's row, at inner index t_k
-    // Bs[tx][t_k] -> B element for this thread's col, at inner index t_k
-    //
-    // Let's load:
-    // As[ty][tx] corresponds to A[row, k_start + tx]. (Loading a chunk of row)
-    // Bs[tx][ty] corresponds to B[col, k_start + ty]???
-    // No, standard tiling loads sub-blocks.
-    //
-    // Let's stick to standard loading:
-    // Load A[row, k*TILE + tx] -> As[ty][tx]
-    // Load B[col, k*TILE + ty] -> Bs[tx][ty]  <-- Transposed load into shared
-    // memory to optimize access? Or just load B[col, k*TILE + tx]?
-    //
-    // If we load B[col, k*TILE + tx] into Bs[ty][tx] (mapping threads to B tile
-    // naturally): B element: B[col, k_idx] k_idx = k * TILE_SIZE + tx? No, we
-    // need TILE x TILE block.
-    //
-    // Let's load B[col, k*TILE + tx] -> Bs[ty][tx]  (Thread mapping:
-    // ty->row(col actually), tx->k) Wait, 'col' depends on 'bx' and 'tx'. 'row'
-    // depends on 'by' and 'ty'. This thread (tx, ty) computes C[row, col].
-    //
-    // Inside computation loop (p = 0..TILE-1):
-    //   val += As[ty][p] * Bs[?][p]
-    // We need B[col, current_k_p].
-    // If we loaded B into Bs s.t. Bs[tx][p] is B[col, p]... confusing.
-    //
-    // Standard Matrix Mul A x B:
-    // C[y, x] = sum A[y, k] * B[k, x]
-    // Here we have A x B^T.
-    // C[row, col] = sum A[row, k] * B[col, k]
-    //
-    // Let's load A chunk: A[row, k_chunk + tx].
-    // Let's load B chunk: B[col, k_chunk + ty].
-    //
-    // Issue: k_chunk + tx means we are loading different k's for the same row.
-    // Yes, we cooperatively load the tile A[row_range, k_range].
-    // TILE=16. Block=16x16.
-    // We need to load A[row, k_chunk..k_chunk+15].
-    // 256 threads.
-    // Each thread loads 1 element of A tile and 1 element of B tile.
-    // As[ty][tx] = A[row, k*TILE + tx].
-    // Bs[ty][tx] = B[col, k*TILE + tx] (Since B is (N, K), 'col' is first dim).
-
-    int k_curr = k * TILE_SIZE + tx;
-    if (col < N && k_curr < K)
-      Bs[ty][tx] = B[col * K + k_curr];
-    else
-      Bs[ty][tx] = 0;
-
-    __syncthreads();
-
-    // Compute
-    // val += A[row, k_base + p] * B[col, k_base + p]
-    // As[ty][p] is A[row, k_base + p]
-    // Bs[tx][p] is B[col, k_base + p] ??? No.
-    // Bs[ty][tx] stored B[col, k+tx].
-    // So Bs[tx][p] (if we use tx as col index inside block) would give B[?, ?].
-    //
-    // My load was: Bs[ty][tx] = B[col, k+tx].
-    // 'col' is (bx*TILE + ??). 'col' in my load logic was (bx*TILE + tx).
-    // Wait, earlier I defined col = bx * TILE + tx.
-    // So Bs[ty][tx] holds B[col_of_thread, k+tx].
-    // This seems wrong for what we need. We need B[col_of_this_thread, k+p].
-    // But B is shared.
-    // Every thread in this block needs B[its_col, k+p].
-    // 'its_col' is fixed for the thread (bx*TILE + tx).
-    // So Bs needs to store [tx][p].
-    //
-    // Let's verify loading:
-    // Bs[tx][ty] = B[ (bx*TILE + tx), (k*TILE + ty) ]
-    // -> Loads B[col, k] column-major into shared mem?
-    //
-    // Let's stick to simplest coordinate mapping:
-    // As[ty][tx] = A[row, k*TILE + tx]
-    // Bs[tx][ty] = B[col, k*TILE + ty]  <-- Load transposed B tile?
-    //
-    // Let's try:
-    // int t_row = row;       // global row index for A
-    // int t_col = col;       // global col index for B (which is row index in B
-    // tensor)
-    //
-    // As[ty][tx] = A[t_row, k*TILE + tx];
-    // Bs[tx][ty] = B[t_col, k*TILE + ty];  // Load B[col, k]
-    //
-    // Boundary checks...
-    //
-    // Then loop p=0..TILE-1:
-    // val += As[ty][p] * Bs[tx][p];
-    // As[ty][p] -> A[row, k+p]
-    // Bs[tx][p] -> B[col, k+p]
-    // Correct!
-
-    // Correct Loading Logic:
+    // --- Load tile of A into shared memory ---
+    // Thread (ty, tx) loads A[row, k*TILE + tx].
+    // k_idx_a is the global K-dimension index for this thread's A element.
     int k_idx_a = k * TILE_SIZE + tx;
     if (row < M && k_idx_a < K)
       As[ty][tx] = A[row * K + k_idx_a];
     else
-      As[ty][tx] = 0;
+      As[ty][tx] = 0; // Zero-pad out-of-bounds elements.
 
-    int k_idx_b = k * TILE_SIZE + ty; // we use ty for k dimension in B load
-    // We use 'col' (bx*TILE + tx) as the 'N' dimension index for B.
+    // --- Load tile of B into shared memory (transposed) ---
+    // B is stored as (N, K): B[col, k_idx_b] is the weight for output neuron
+    // 'col' at input feature 'k_idx_b'.
+    // We load B[col, k*TILE + ty] into Bs[tx][ty].
+    // This transposed indexing (Bs[tx][ty] rather than Bs[ty][tx]) ensures
+    // that the accumulation loop below can read Bs[tx][p] with tx fixed for
+    // each thread, keeping shared memory access patterns efficient.
+    int k_idx_b = k * TILE_SIZE + ty; // ty indexes into the K dimension of B
     if (col < N && k_idx_b < K)
       Bs[tx][ty] = B[col * K + k_idx_b];
     else
-      Bs[tx][ty] = 0;
+      Bs[tx][ty] = 0; // Zero-pad out-of-bounds elements.
 
+    // Barrier 1: All threads in the block must finish loading their tile
+    // elements into shared memory before any thread begins the dot product.
     __syncthreads();
 
+    // --- Inner product over the loaded tile ---
+    // val += A[row, k_base + p] * B[col, k_base + p]  for p in [0, TILE_SIZE)
+    // As[ty][p] provides A[row, k_base + p].
+    // Bs[tx][p] provides B[col, k_base + p] (due to the transposed load above).
     for (int p = 0; p < TILE_SIZE; ++p) {
       // Optimization: Ternary logic
       // int8 multiplication is fast, but we can also use branching if needed.
@@ -183,43 +130,79 @@ __global__ void ternary_matmul_kernel(const int8_t *A, const int8_t *B,
           (int32_t)As[ty][p] *
           (int32_t)Bs[tx][p]; // Accessing Bs[tx][p] corresponds to B[col, k+p]
     }
+
+    // Barrier 2: All threads must finish consuming the shared tile before the
+    // next iteration overwrites As and Bs with the next K-tile.
     __syncthreads();
   }
 
+  // Write the accumulated result to global memory.
+  // Guard ensures out-of-bounds threads (from grid padding) do not write.
   if (row < M && col < N) {
     C[row * N + col] = val;
   }
 }
 
-// Wrapper to launch kernel
+// ---------------------------------------------------------------------------
+// ternary_matmul  (C-linkage wrapper)
+//
+// Purpose:
+//   Host-side entry point that manages device memory allocation, data
+//   transfers, kernel launch, result copy-back, and cleanup for a single
+//   ternary matrix multiplication call.  This is the symbol loaded at runtime
+//   by the Python ctypes wrapper (atomic_1bit/python/wrapper.py).
+//
+// Parameters:
+//   A             - Host pointer to INT8 activation matrix, shape (M, K).
+//   B_transposed  - Host pointer to INT8 weight matrix, shape (N, K).
+//                   The caller (Python wrapper) is responsible for transposing
+//                   the standard (K, N) weight layout to (N, K) before calling.
+//   C             - Host pointer to INT32 output buffer, shape (M, N).
+//                   Must be allocated by the caller before this function.
+//   M, N, K       - Matrix dimensions as described above.
+//
+// Notes:
+//   - Device memory is allocated, used, and freed on every call.  This is
+//     acceptable for a proof-of-concept but adds significant overhead for
+//     repeated calls.  A production backend would use persistent device
+//     buffers or the stream-based API.
+//   - The CUDA runtime implicitly manages the CUDA context; no explicit
+//     cuInit / cuCtxCreate is required.
+//   - Error checking on CUDA API calls is omitted for brevity in this
+//     proof-of-concept implementation (v1.2).
+// ---------------------------------------------------------------------------
 extern "C" {
 void ternary_matmul(const int8_t *A, const int8_t *B_transposed, int32_t *C,
                     int M, int N, int K) {
-  // Implement lazy init or assume context is set?
-  // Standard CUDA runtime API handles context.
-
-  // Allocate device memory
+  // Device pointers for A, B, and C.
   int8_t *d_A, *d_B;
   int32_t *d_C;
 
+  // Allocate device memory for all three matrices.
   cudaMalloc(&d_A, M * K * sizeof(int8_t));
   cudaMalloc(&d_B, N * K * sizeof(int8_t));
   cudaMalloc(&d_C, M * N * sizeof(int32_t));
 
-  // Copy inputs
+  // Copy input matrices from host to device.
   cudaMemcpy(d_A, A, M * K * sizeof(int8_t), cudaMemcpyHostToDevice);
   cudaMemcpy(d_B, B_transposed, N * K * sizeof(int8_t), cudaMemcpyHostToDevice);
 
-  // Launch
+  // Configure launch parameters.
+  // Block: 16x16 = 256 threads.
+  // Grid: enough blocks to cover the full (M, N) output matrix, with one
+  //       thread per output element.  Padding blocks handle non-multiples of
+  //       TILE_SIZE via the boundary guards inside the kernel.
   dim3 block(TILE_SIZE, TILE_SIZE);
   dim3 grid((N + TILE_SIZE - 1) / TILE_SIZE, (M + TILE_SIZE - 1) / TILE_SIZE);
 
+  // Launch the kernel.  Execution is asynchronous with respect to the host;
+  // the following cudaMemcpy implicitly synchronizes.
   ternary_matmul_kernel<<<grid, block>>>(d_A, d_B, d_C, M, N, K);
 
-  // Copy back
+  // Copy result back from device to host (synchronizes the kernel).
   cudaMemcpy(C, d_C, M * N * sizeof(int32_t), cudaMemcpyDeviceToHost);
 
-  // Free
+  // Free device memory.
   cudaFree(d_A);
   cudaFree(d_B);
   cudaFree(d_C);

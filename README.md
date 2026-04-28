@@ -191,7 +191,7 @@ config = config_to_atomic(load_config("configs/stories_base.yaml"))
 ## Running Tests
 
 ```bash
-# Run the full test suite (67 tests)
+# Run the full test suite
 pytest tests/ -v
 
 # Run specific test modules

@@ -134,7 +134,7 @@ def run_evaluation(model_path, output_path=None, device=None):
             gpt_id = ds.reverse_map.get(t, ds.enc.eot_token)
             try:
                 text += ds.enc.decode([gpt_id])
-            except:
+            except (UnicodeDecodeError, ValueError, KeyError):
                 pass
 
         rep_rates = calculate_repetition_rates(text)

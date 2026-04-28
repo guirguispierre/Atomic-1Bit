@@ -1,0 +1,186 @@
+name: CI
+
+on:
+  push:
+    branches: [ master, feature/** ]
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  test:
+    name: Test Suite
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+        cache: 'pip'
+
+    - name: Install Python dependencies
+      run: |
+        pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest black flake8 isort
+
+    - name: Install build dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential g++ make
+
+    - name: Build C++ kernel (CPU backend)
+      run: |
+        cd atomic_1bit/core
+        make clean
+        make BACKEND=CPU
+        cd ../..
+
+    - name: Verify libatomic.so was built
+      run: |
+        test -f atomic_1bit/core/libatomic.so || (echo "libatomic.so not found!" && exit 1)
+        ls -lh atomic_1bit/core/libatomic.so
+
+    - name: Run linting - Black
+      run: |
+        black --check atomic_1bit/ tests/ benchmarks/ tools/ scripts/ --exclude='/(\.git|\.venv|build|dist)/'
+      continue-on-error: true
+
+    - name: Run linting - isort
+      run: |
+        isort --check-only atomic_1bit/ tests/ benchmarks/ tools/ scripts/ --profile black
+      continue-on-error: true
+
+    - name: Run linting - flake8
+      run: |
+        flake8 atomic_1bit/ tests/ benchmarks/ tools/ scripts/ --max-line-length=100 --extend-ignore=E203,W503
+      continue-on-error: true
+
+    - name: Run pytest suite
+      run: |
+        pytest tests/ -v --tb=short
+      timeout-minutes: 10
+
+    - name: Run kernel parity verification
+      run: |
+        python3 atomic_1bit/python/inference.py
+      timeout-minutes: 5
+
+    - name: Run full parity check
+      run: |
+        python3 tools/parity_check.py
+      timeout-minutes: 5
+      continue-on-error: true
+
+    - name: Upload test results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: test-results
+        path: |
+          pytest.xml
+          .coverage
+        retention-days: 30
+
+  benchmark:
+    name: Performance Benchmark
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+        cache: 'pip'
+
+    - name: Install dependencies
+      run: |
+        pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Install build dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential g++ make
+
+    - name: Build C++ kernel
+      run: |
+        cd atomic_1bit/core
+        make clean
+        make BACKEND=CPU
+        cd ../..
+
+    - name: Download baseline benchmark
+      uses: dawidd6/action-download-artifact@v3
+      with:
+        workflow: ci.yml
+        name: benchmark-baseline
+        path: baseline/
+        if_no_artifact_found: warn
+      continue-on-error: true
+
+    - name: Run benchmark suite
+      run: |
+        python3 benchmarks/run_suite.py
+      timeout-minutes: 15
+      continue-on-error: true
+
+    - name: Compare against baseline
+      if: hashFiles('baseline/benchmark_results.json') != ''
+      run: |
+        python3 -c "
+        import json
+        import sys
+
+        with open('baseline/benchmark_results.json', 'r') as f:
+            baseline = json.load(f)
+
+        with open('benchmark_results.json', 'r') as f:
+            current = json.load(f)
+
+        # Compare TPS (tokens per second)
+        baseline_tps = baseline.get('atomic_tps', 0)
+        current_tps = current.get('atomic_tps', 0)
+
+        if baseline_tps > 0:
+            regression = (baseline_tps - current_tps) / baseline_tps * 100
+            print(f'Baseline TPS: {baseline_tps:.2f}')
+            print(f'Current TPS: {current_tps:.2f}')
+            print(f'Regression: {regression:.2f}%')
+
+            if regression > 10:
+                print('ERROR: Performance regression exceeds 10%!')
+                sys.exit(1)
+            elif regression > 5:
+                print('WARNING: Performance regression between 5-10%')
+            else:
+                print('Performance is acceptable')
+        else:
+            print('No baseline TPS found, skipping comparison')
+        "
+      continue-on-error: true
+
+    - name: Upload benchmark results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: benchmark-results
+        path: |
+          benchmark_results.json
+          assets/
+        retention-days: 30
+
+    - name: Save as new baseline (master only)
+      if: github.ref == 'refs/heads/master' && github.event_name == 'push'
+      uses: actions/upload-artifact@v4
+      with:
+        name: benchmark-baseline
+        path: benchmark_results.json
+        retention-days: 90
