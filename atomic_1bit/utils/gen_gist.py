@@ -11,13 +11,6 @@ sys.path.append(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from atomic_1bit.model.transformer import AtomicTransformer, AtomicConfig
 
-# Defaults for the Instruct Model (Flagship Efficient)
-DIM = 320
-DEPTH = 8
-HEADS = 5
-VOCAB = 4096
-CTX = 256
-
 def load_vocab_map(vocab_file):
     if not os.path.exists(vocab_file):
         print(f"Error: Vocab map {vocab_file} not found.")
@@ -37,12 +30,17 @@ def main():
     parser.add_argument("--output", type=str, default="personality.gist", help="Output .gist file")
     parser.add_argument("--model_path", type=str, default="weights/instruct_final.pt", help="Path to trained model weights")
     parser.add_argument("--vocab_map", type=str, default="weights/vocab_map_instruct.json", help="Path to vocab map")
-    
+    parser.add_argument("--dim", type=int, default=320, help="Model embedding dimension")
+    parser.add_argument("--depth", type=int, default=8, help="Number of transformer layers")
+    parser.add_argument("--heads", type=int, default=5, help="Number of attention heads")
+    parser.add_argument("--vocab_size", type=int, default=4096, help="Vocabulary size")
+    parser.add_argument("--context_length", type=int, default=256, help="Maximum context length")
+
     args = parser.parse_args()
-    
+
     # 1. Load Vocab Map
     token_map = load_vocab_map(args.vocab_map)
-    UNK_ID = VOCAB - 1
+    UNK_ID = args.vocab_size - 1
     
     # 2. Tokenize Prompt
     enc = tiktoken.get_encoding("gpt2")
@@ -63,7 +61,13 @@ def main():
     elif torch.cuda.is_available(): device = "cuda"
     else: device = "cpu"
     
-    config = AtomicConfig(vocab_size=VOCAB, dim=DIM, depth=DEPTH, heads=HEADS, context_length=CTX)
+    config = AtomicConfig(
+        vocab_size=args.vocab_size,
+        dim=args.dim,
+        depth=args.depth,
+        heads=args.heads,
+        context_length=args.context_length,
+    )
     model = AtomicTransformer(config).to(device)
     
     if os.path.exists(args.model_path):

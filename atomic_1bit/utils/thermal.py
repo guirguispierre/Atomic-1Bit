@@ -54,6 +54,16 @@ class ThermalMonitor:
             logger.warning("ThermalMonitor: Failed to read sensor temperatures: %s", e)
             return None
 
+    def get_current_temp(self):
+        """Public accessor: max sensor temperature in C, or None if unavailable.
+
+        Returns None when monitoring is disabled or sensor reads fail, so
+        callers can format/log without crashing.
+        """
+        if not self.enabled:
+            return None
+        return self._get_max_temp()
+
     def check_and_pause(self, step, model=None, optimizer=None, scheduler=None, save_path=None):
         """
         Checks temperature. If too high, pauses execution until cool.
