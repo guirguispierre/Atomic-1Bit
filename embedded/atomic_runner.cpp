@@ -477,81 +477,202 @@ void forward(AtomicModel &model, const vector<int> &tokens,
   // }
 }
 
-// Temperature Sampling
-int sample_logits(const vector<float> &logits, float temp, std::mt19937 &rng) {
+// Sampling: temperature + optional top-k + optional top-p (nucleus).
+//
+// Order of operations matches the conventional implementation:
+//   1) temperature scales logits
+//   2) softmax to probabilities
+//   3) top-k truncation (if top_k > 0)
+//   4) top-p truncation (if top_p in (0, 1))
+//   5) renormalize and sample
+//
+// temp == 0 => argmax (greedy), ignoring top_k / top_p.
+int sample_logits(const vector<float> &logits, float temp, int top_k,
+                  float top_p, std::mt19937 &rng) {
   if (temp < 1e-5f) {
-    // Greedy
     int best_token = 0;
     float best_val = -1e9f;
-    for (int i = 0; i < logits.size(); ++i) {
+    for (size_t i = 0; i < logits.size(); ++i) {
       if (logits[i] > best_val) {
         best_val = logits[i];
-        best_token = i;
+        best_token = (int)i;
       }
     }
     return best_token;
   }
 
-  // Softmax with Temp
-  vector<float> probs(logits.size());
+  int V = (int)logits.size();
+  vector<float> probs(V);
   float max_val = -1e9f;
   for (float v : logits)
     max_val = max(max_val, v);
 
   float sum_exp = 0.0f;
-  for (int i = 0; i < logits.size(); ++i) {
+  for (int i = 0; i < V; ++i) {
     probs[i] = exp((logits[i] - max_val) / temp);
     sum_exp += probs[i];
   }
+  if (sum_exp <= 0.0f)
+    return 0;
+  for (int i = 0; i < V; ++i)
+    probs[i] /= sum_exp;
 
-  std::uniform_real_distribution<float> dist(0.0f, sum_exp);
+  // Build (prob, idx) for ranking only if we need to truncate.
+  bool use_topk = top_k > 0 && top_k < V;
+  bool use_topp = top_p > 0.0f && top_p < 1.0f;
+
+  if (!use_topk && !use_topp) {
+    std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+    float r = dist(rng);
+    float acc = 0.0f;
+    for (int i = 0; i < V; ++i) {
+      acc += probs[i];
+      if (r <= acc)
+        return i;
+    }
+    return V - 1;
+  }
+
+  vector<pair<float, int>> ranked(V);
+  for (int i = 0; i < V; ++i)
+    ranked[i] = {probs[i], i};
+
+  // Sort descending by probability.
+  std::sort(ranked.begin(), ranked.end(),
+            [](const pair<float, int> &a, const pair<float, int> &b) {
+              return a.first > b.first;
+            });
+
+  int kept = use_topk ? top_k : V;
+
+  if (use_topp) {
+    float cum = 0.0f;
+    int p_kept = 0;
+    for (; p_kept < kept; ++p_kept) {
+      cum += ranked[p_kept].first;
+      if (cum >= top_p) {
+        p_kept += 1;
+        break;
+      }
+    }
+    if (p_kept < 1)
+      p_kept = 1; // never empty
+    kept = p_kept;
+  }
+
+  float renorm = 0.0f;
+  for (int i = 0; i < kept; ++i)
+    renorm += ranked[i].first;
+  if (renorm <= 0.0f)
+    return ranked[0].second;
+
+  std::uniform_real_distribution<float> dist(0.0f, renorm);
   float r = dist(rng);
   float acc = 0.0f;
-  for (int i = 0; i < probs.size(); ++i) {
-    acc += probs[i];
+  for (int i = 0; i < kept; ++i) {
+    acc += ranked[i].first;
     if (r <= acc)
-      return i;
+      return ranked[i].second;
   }
-  return probs.size() - 1;
+  return ranked[kept - 1].second;
 }
 
 // Debug Utils (Moved to top)
 
+// Parse "1,2,3,4" -> [1, 2, 3, 4]. Empty string => empty vector.
+static vector<int> parse_token_list(const string &s) {
+  vector<int> out;
+  if (s.empty())
+    return out;
+  size_t pos = 0;
+  while (pos < s.size()) {
+    size_t comma = s.find(',', pos);
+    string tok =
+        s.substr(pos, comma == string::npos ? string::npos : comma - pos);
+    if (!tok.empty()) {
+      try {
+        out.push_back(std::stoi(tok));
+      } catch (...) {
+        cerr << "Warning: skipping non-integer token '" << tok << "'" << endl;
+      }
+    }
+    if (comma == string::npos)
+      break;
+    pos = comma + 1;
+  }
+  return out;
+}
+
+static void print_help() {
+  cout << "Atomic-1Bit Runner\n"
+       << "  --model PATH         Model .bin path (default atomic_model.bin)\n"
+       << "  --steps N            Number of tokens to generate (default 50)\n"
+       << "  --temp F             Sampling temperature, 0 = greedy (default 0)\n"
+       << "  --top_k N            Keep top N logits before sampling\n"
+       << "  --top_p F            Nucleus sampling, keep smallest set with cum prob >= F\n"
+       << "  --seed N             RNG seed (default 42)\n"
+       << "  --start_token N      Single starting token id (default 42)\n"
+       << "  --prompt 1,2,3       Comma-separated starting token ids (overrides --start_token)\n"
+       << "  --stream             Print tokens as they are generated (default on)\n"
+       << "  --no-stream          Buffer all tokens and print at end\n"
+       << "  --parity             Run a single-step parity check\n"
+       << "  --help               Show this message\n";
+}
+
 int main(int argc, char **argv) {
   string model_path = "atomic_model.bin";
+  string prompt_str;
   int gen_len = 50;
   float temp = 0.0f;
+  int top_k = 0;
+  float top_p = 0.0f;
   int seed = 42;
   int start_token = 42;
-  bool parity_mode = false; // New Flag
+  bool parity_mode = false;
+  bool stream = true;
 
-  // Simple Arg Parsing
   for (int i = 1; i < argc; ++i) {
     string arg = argv[i];
-    if (arg == "--model" && i + 1 < argc)
+    if (arg == "--help" || arg == "-h") {
+      print_help();
+      return 0;
+    } else if (arg == "--model" && i + 1 < argc)
       model_path = argv[++i];
     else if (arg == "--steps" && i + 1 < argc)
       gen_len = atoi(argv[++i]);
     else if (arg == "--temp" && i + 1 < argc)
-      temp = atof(argv[++i]);
+      temp = (float)atof(argv[++i]);
+    else if (arg == "--top_k" && i + 1 < argc)
+      top_k = atoi(argv[++i]);
+    else if (arg == "--top_p" && i + 1 < argc)
+      top_p = (float)atof(argv[++i]);
     else if (arg == "--seed" && i + 1 < argc)
       seed = atoi(argv[++i]);
     else if (arg == "--start_token" && i + 1 < argc)
       start_token = atoi(argv[++i]);
+    else if (arg == "--prompt" && i + 1 < argc)
+      prompt_str = argv[++i];
+    else if (arg == "--stream")
+      stream = true;
+    else if (arg == "--no-stream")
+      stream = false;
     else if (arg == "--parity")
       parity_mode = true;
+    else {
+      cerr << "Unknown arg: " << arg << " (use --help)" << endl;
+      return 2;
+    }
   }
 
   if (parity_mode) {
     cout << "--- C++ Parity Check ---" << endl;
-    gen_len = 1; // Force single step
+    gen_len = 1;
   }
 
-  // ... (rest of main)
-
   cout << "Atomic-1Bit Engine | Model: " << model_path
-       << " | Steps: " << gen_len << " | Temp: " << temp << " | Seed: " << seed
-       << endl;
+       << " | Steps: " << gen_len << " | Temp: " << temp
+       << " | Top-k: " << top_k << " | Top-p: " << top_p
+       << " | Seed: " << seed << endl;
 
   std::mt19937 rng(seed);
 
@@ -561,34 +682,58 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  vector<int> context;
-  context.push_back(start_token);
+  vector<int> context = parse_token_list(prompt_str);
+  if (context.empty())
+    context.push_back(start_token);
 
-  cout << "Generating: ";
+  for (int t : context) {
+    if (t < 0 || t >= model.config.vocab_size) {
+      cerr << "Error: prompt token " << t << " out of vocab range [0, "
+           << model.config.vocab_size << ")" << endl;
+      return 1;
+    }
+  }
+
+  if (stream) {
+    cout << "Generating: ";
+    for (int t : context)
+      cout << t << " ";
+    cout.flush();
+  }
 
   Workspace ws;
   ws.ensure_size(model.config.max_seq_len, model.config.dim);
 
+  vector<int> generated;
   auto start_time = std::chrono::high_resolution_clock::now();
 
   for (int step = 0; step < gen_len; ++step) {
-    // Rolling Window
-    if (context.size() > model.config.max_seq_len) {
+    if ((int)context.size() > model.config.max_seq_len) {
       context.erase(context.begin(),
                     context.begin() +
-                        (context.size() - model.config.max_seq_len));
+                        ((int)context.size() - model.config.max_seq_len));
     }
 
     vector<float> logits(model.config.vocab_size);
     forward(model, context, logits, ws, parity_mode);
-    int best_token = sample_logits(logits, temp, rng);
-    cout << best_token << " " << flush;
-    context.push_back(best_token);
+    int next_token = sample_logits(logits, temp, top_k, top_p, rng);
+    generated.push_back(next_token);
+    context.push_back(next_token);
+    if (stream) {
+      cout << next_token << " " << flush;
+    }
   }
 
   auto end_time = std::chrono::high_resolution_clock::now();
   std::chrono::duration<double> diff = end_time - start_time;
   double tps = gen_len / diff.count();
+
+  if (!stream) {
+    cout << "Generated: ";
+    for (int t : generated)
+      cout << t << " ";
+  }
+
   cout << endl << "Done." << endl;
   cout << "TPS: " << tps << endl;
 

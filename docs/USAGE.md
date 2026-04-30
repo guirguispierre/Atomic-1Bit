@@ -80,14 +80,19 @@ After exporting a model (see below):
 
 ```bash
 cd embedded
-./runner --model atomic_model.bin --steps 100 --temp 0.7 --seed 42 --start_token 58
+./runner --model atomic_model.bin --steps 100 --temp 0.7 --top_p 0.9 --seed 42 --prompt 1,42,58
 ```
 
 Flags:
 - `--steps` -- Number of tokens to generate
 - `--temp` -- Temperature (0.0 = greedy, 0.7 = creative)
+- `--top_k` -- Keep top-K logits before sampling (0 = disabled)
+- `--top_p` -- Nucleus sampling cutoff (0.0 = disabled, 0.9 = typical)
 - `--seed` -- Random seed for reproducibility
-- `--start_token` -- Initial token ID
+- `--start_token` -- Single starting token ID (default 42)
+- `--prompt 1,2,3` -- Comma-separated starting token IDs (overrides `--start_token`)
+- `--stream` / `--no-stream` -- Stream tokens as generated, or buffer until end
+- `--help` -- Show all flags
 
 ## Exporting Models
 

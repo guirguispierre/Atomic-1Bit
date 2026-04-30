@@ -109,8 +109,13 @@ g++ -O3 -std=c++17 atomic_runner.cpp -o runner
   - `--model`: Path to binary model file.
   - `--steps`: Number of tokens to generate.
   - `--temp`: Temperature (0.0 = Greedy/Deterministic, 0.7 = Creative).
+  - `--top_k`: Keep top-K logits before sampling (0 = disabled).
+  - `--top_p`: Nucleus sampling cutoff (0.0 = disabled, 0.9 = typical).
   - `--seed`: Random seed for reproducibility.
-  - `--start_token`: Initial token ID (e.g., 58 for "Once").
+  - `--start_token`: Single initial token ID (e.g., 58 for "Once").
+  - `--prompt 1,2,3`: Comma-separated starting token IDs (overrides `--start_token`).
+  - `--stream` / `--no-stream`: Stream tokens as generated (default on) vs. buffer until end.
+  - `--help`: Show all flags.
 
 ---
 

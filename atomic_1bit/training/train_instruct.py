@@ -382,10 +382,12 @@ def train():
             # Logging
             if step % 10 == 0:
                 current_lr = scheduler.get_last_lr()[0]
-                print(f"Step {step}/{total_steps_target} | Loss: {loss_accum:.4f} | LR: {current_lr:.2e} | Temp: {current_temp:.1f}C | Time: {step_duration_ms:.1f}ms")
+                temp_str = f"{current_temp:.1f}C" if current_temp is not None else "n/a"
+                temp_csv = f"{current_temp:.1f}" if current_temp is not None else ""
+                print(f"Step {step}/{total_steps_target} | Loss: {loss_accum:.4f} | LR: {current_lr:.2e} | Temp: {temp_str} | Time: {step_duration_ms:.1f}ms")
 
                 with open(log_file, "a") as f:
-                    f.write(f"{step},{loss_accum:.5f},{current_lr:.5e},{current_temp:.1f},{step_duration_ms:.1f}\n")
+                    f.write(f"{step},{loss_accum:.5f},{current_lr:.5e},{temp_csv},{step_duration_ms:.1f}\n")
 
             if step % 500 == 0 and step > 0:
                 generate_demo(model, ds, "What is AI?")
