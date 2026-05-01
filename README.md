@@ -209,13 +209,13 @@ We welcome contributions. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines 
 
 ## Roadmap
 
-See [ROADMAP.md](ROADMAP.md) for the full development plan.
+See [ROADMAP.md](ROADMAP.md) for the full development plan and [CHANGELOG.md](CHANGELOG.md) for per-release detail.
 
 - **v1.0** -- Parity-verified ternary inference (done)
-- **v1.2** -- Hardware-native backends: Metal, CUDA (done)
+- **v1.2** -- Hardware-native backends: Metal, CUDA, NEON/AVX2 SIMD (done)
 - **v1.3** -- Model scaling, evaluation harness, 12.5M config (done)
-- **v2.0** -- YAML configs, tokenizer abstraction, model presets (done)
-- **Next** -- SIMD acceleration (AVX2/NEON), mobile demos, mixed-precision training
+- **v1.4** -- Format-correct C++ deployment, top-p / top-k sampling, robust CLIs (current)
+- **Next** -- Mobile demos, mixed-precision training, HTTP serving wrapper
 
 ---
 
