@@ -3,6 +3,8 @@ import struct
 import os
 import sys
 
+import numpy as np
+
 # Add project root to path
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", ".."))
 
@@ -13,6 +15,29 @@ def quantize_and_transpose_weight(w):
     scale = 1.0 / w.abs().mean().clamp(min=1e-5)
     w_q = (w * scale).round().clamp(-1, 1).to(torch.int8)
     return w_q.t().contiguous().cpu().numpy()
+
+
+def pack_ternary(w_q):
+    """Pack ternary weights four per byte, low-order pair first.
+
+    Values are stored as w + 1, so {-1, 0, 1} map to {0, 1, 2} and the unused
+    code 3 never appears. The flat row-major order of w_q is preserved; the
+    final byte is zero-padded when the element count is not a multiple of 4.
+    """
+    flat = w_q.reshape(-1).astype(np.int8)
+    codes = (flat + 1).astype(np.uint8)
+    pad = (-codes.size) % 4
+    if pad:
+        codes = np.concatenate([codes, np.zeros(pad, dtype=np.uint8)])
+    q = codes.reshape(-1, 4)
+    return (q[:, 0] | (q[:, 1] << 2) | (q[:, 2] << 4) | (q[:, 3] << 6)).astype(np.uint8)
+
+
+def unpack_ternary(packed, count):
+    """Inverse of pack_ternary, for tests and tooling."""
+    b = np.frombuffer(packed, dtype=np.uint8)
+    codes = np.stack([b & 3, (b >> 2) & 3, (b >> 4) & 3, (b >> 6) & 3], axis=1)
+    return (codes.reshape(-1)[:count].astype(np.int8) - 1)
 
 
 def export_model(model: AtomicTransformer, filename: str, prompt: str = None, gist_file: str = None):
@@ -51,9 +76,9 @@ def export_model(model: AtomicTransformer, filename: str, prompt: str = None, gi
     with open(filename, "wb") as f:
         # 1. Header with Magic Bytes and Version
         # Magic: 'ATOM' = 0x41544F4D
-        # Version: 1
+        # guirguispierre 2026-08-10 - v2 packs ternary weights four per byte
         magic = 0x41544F4D
-        version = 1
+        version = 2
 
         # vocab_size, dim, depth, heads, max_seq_len, has_gist (6 * 4 = 24 bytes)
         c = model.config
@@ -84,8 +109,9 @@ def export_model(model: AtomicTransformer, filename: str, prompt: str = None, gi
                  print(f"  Wrote scale: {scale_val:.6f} [Hex: {hex_str}]")
 
                  data = quantize_and_transpose_weight(tensor)
-                 f.write(data.tobytes())
-                 print(f"  Wrote {name}: {data.shape} (b - quantized)")
+                 blob = pack_ternary(data)
+                 f.write(blob.tobytes())
+                 print(f"  Wrote {name}: {data.shape} -> {blob.size} bytes (2-bit packed)")
                  return
 
             data = tensor.detach().cpu().numpy()
