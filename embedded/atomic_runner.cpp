@@ -196,8 +196,10 @@ bool load_model(const char *filename, AtomicModel &model) {
   }
 
   f.read((char *)&version, sizeof(int32_t));
-  if (version != 1) {
-    cerr << "Unsupported version: " << version << endl;
+  if (version != 2) {
+    cerr << "Unsupported version: " << version
+         << " (expected 2; re-export with atomic_1bit/utils/export_to_cpp.py)"
+         << endl;
     return false;
   }
 
@@ -227,14 +229,22 @@ bool load_model(const char *filename, AtomicModel &model) {
          << " Pos: " << f.tellg() << endl;
   };
 
+  // guirguispierre 2026-08-10 - weights arrive four per byte as w+1; unpack at
+  // load so the hot loop still sees a plain int8 array
   auto read_i8 = [&](TensorI8 &t, int r, int c_dim) {
     t.rows = r;
     t.cols = c_dim;
-    // Read Scale
     f.read((char *)&t.scale, sizeof(float));
-    t.data.resize(r * c_dim);
-    size_t bytes = t.data.size() * sizeof(int8_t);
-    f.read((char *)t.data.data(), bytes);
+
+    size_t n = (size_t)r * c_dim;
+    size_t bytes = (n + 3) / 4;
+    vector<uint8_t> packed(bytes);
+    f.read((char *)packed.data(), bytes);
+
+    t.data.resize(n);
+    for (size_t i = 0; i < n; ++i)
+      t.data[i] = (int8_t)((packed[i >> 2] >> (2 * (i & 3))) & 3) - 1;
+
     cout << "    Read I8 (" << r << "x" << c_dim << ") Bytes: " << bytes
          << " Pos: " << f.tellg() << endl;
   };
