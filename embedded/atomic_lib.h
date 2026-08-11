@@ -15,7 +15,7 @@ using namespace std;
 // Binary format magic ("ATOM" packed as little-endian int32) and version.
 // Must match atomic_1bit/utils/export_to_cpp.py.
 static constexpr uint32_t ATOMIC_MAGIC = 0x41544F4Du;
-static constexpr uint32_t ATOMIC_VERSION = 1u;
+static constexpr uint32_t ATOMIC_VERSION = 2u;
 
 struct Config {
   int vocab_size;
@@ -151,6 +151,20 @@ inline bool read_scale(ifstream &f, float &out) {
   return (bool)f.read((char *)&out, sizeof(float));
 }
 
+// guirguispierre 2026-08-10 - weights arrive four per byte as w+1; unpack at
+// load so the hot loop still sees a plain int8 array
+inline bool read_packed_weights(ifstream &f, vector<int8_t> &out, size_t count) {
+  size_t bytes = (count + 3) / 4;
+  vector<uint8_t> packed(bytes);
+  if (!f.read((char *)packed.data(), bytes))
+    return false;
+
+  out.resize(count);
+  for (size_t i = 0; i < count; ++i)
+    out[i] = (int8_t)((packed[i >> 2] >> (2 * (i & 3))) & 3) - 1;
+  return true;
+}
+
 inline bool load_model(const string &filename, AtomicModel &model) {
   ifstream f(filename, ios::binary);
   if (!f.is_open()) {
@@ -202,20 +216,16 @@ inline bool load_model(const string &filename, AtomicModel &model) {
 
     int attn_size = dim * dim;
     read_scale(f, layer.q_s);
-    layer.q_w.resize(attn_size);
-    f.read((char *)layer.q_w.data(), attn_size);
+    read_packed_weights(f, layer.q_w, attn_size);
 
     read_scale(f, layer.k_s);
-    layer.k_w.resize(attn_size);
-    f.read((char *)layer.k_w.data(), attn_size);
+    read_packed_weights(f, layer.k_w, attn_size);
 
     read_scale(f, layer.v_s);
-    layer.v_w.resize(attn_size);
-    f.read((char *)layer.v_w.data(), attn_size);
+    read_packed_weights(f, layer.v_w, attn_size);
 
     read_scale(f, layer.o_s);
-    layer.o_w.resize(attn_size);
-    f.read((char *)layer.o_w.data(), attn_size);
+    read_packed_weights(f, layer.o_w, attn_size);
 
     layer.ln2.resize(dim);
     f.read((char *)layer.ln2.data(), dim * sizeof(float));
@@ -223,12 +233,10 @@ inline bool load_model(const string &filename, AtomicModel &model) {
     int size_fc1 = dim * hidden;
     int size_fc2 = hidden * dim;
     read_scale(f, layer.fc1_s);
-    layer.fc1_w.resize(size_fc1);
-    f.read((char *)layer.fc1_w.data(), size_fc1);
+    read_packed_weights(f, layer.fc1_w, size_fc1);
 
     read_scale(f, layer.fc2_s);
-    layer.fc2_w.resize(size_fc2);
-    f.read((char *)layer.fc2_w.data(), size_fc2);
+    read_packed_weights(f, layer.fc2_w, size_fc2);
 
     model.layers.push_back(layer);
   }
@@ -237,8 +245,7 @@ inline bool load_model(const string &filename, AtomicModel &model) {
   f.read((char *)model.ln_f.data(), dim * sizeof(float));
 
   read_scale(f, model.head_s);
-  model.head_w.resize((size_t)dim * model.config.vocab_size);
-  f.read((char *)model.head_w.data(), model.head_w.size());
+  read_packed_weights(f, model.head_w, (size_t)dim * model.config.vocab_size);
 
   if (!f.good() && !f.eof()) {
     cerr << "load_model: stream error after reading model" << endl;
