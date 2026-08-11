@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstring>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <random>
 #include <vector>
@@ -63,10 +64,12 @@ struct AtomicModel {
 // RMSNorm
 void rms_norm(const vector<float> &x, const vector<float> &weight,
               vector<float> &out, int dim) {
-  float sum_sq = 0.0f;
+  // guirguispierre 2026-08-10 - float32 summation drifts from torch's pairwise
+  // sum enough to shift the int8 quant_scale downstream
+  double sum_sq = 0.0;
   for (float v : x)
-    sum_sq += v * v;
-  float rms = sqrt(sum_sq / dim + 1e-5f);
+    sum_sq += (double)v * (double)v;
+  float rms = sqrt((float)(sum_sq / dim) + 1e-5f);
   for (int i = 0; i < dim; ++i) {
     out[i] = (x[i] / rms) * weight[i];
   }
@@ -78,16 +81,17 @@ void rms_norm(const vector<float> &x, const vector<float> &weight,
 // Out: Float output [Out]
 // Scratch: [In] (Pre-allocated buffer to avoid malloc)
 void bit_linear(const vector<float> &x, const TensorI8 &w, vector<float> &out,
-                vector<int8_t> &scratch) {
+                vector<int8_t> &scratch, vector<int32_t> &acc32) {
   int in_dim = w.rows;
   int out_dim = w.cols;
 
   // 0. Internal RMSNorm (Non-affine)
   // Per BitNet paper/impl: BitLinear(x) = Layernorm(x) ...
-  float sum_sq = 0.0f;
+  // guirguispierre 2026-08-10 - double for the same reason as rms_norm
+  double sum_sq_d = 0.0;
   for (float v : x)
-    sum_sq += v * v;
-  float rms = sqrt(sum_sq / in_dim + 1e-5f);
+    sum_sq_d += (double)v * (double)v;
+  float rms = sqrt((float)(sum_sq_d / in_dim) + 1e-5f);
 
   // 1. Quantize Input
   // We effectively quantize (x / rms).
@@ -100,14 +104,16 @@ void bit_linear(const vector<float> &x, const TensorI8 &w, vector<float> &out,
     max_val = 1e-5f;
 
   float quant_scale = 127.0f / max_val;
-  // effective_scale = quant_scale / rms
-  float effective_scale = quant_scale / rms;
 
-  vector<int8_t> x_q(in_dim);
+  // guirguispierre 2026-08-10 - divide before scaling to match
+  // activation_quant(); folding it into one multiply rounds differently
+  // guirguispierre 2026-08-10 - caller's buffer avoids a malloc per call in the
+  // hot loop on microcontrollers
+  if ((int)scratch.size() < in_dim)
+    scratch.resize(in_dim);
+  int8_t *x_q = scratch.data();
   for (int i = 0; i < in_dim; ++i) {
-    // x_norm = x[i] / rms
-    // val = x_norm * quant_scale
-    float val = round(x[i] * effective_scale);
+    float val = round((x[i] / rms) * quant_scale);
     if (val > 127)
       val = 127;
     if (val < -127)
@@ -116,42 +122,40 @@ void bit_linear(const vector<float> &x, const TensorI8 &w, vector<float> &out,
   }
 
   // 2. Ternary Kernel
-  fill(out.begin(), out.end(), 0.0f);
+  // guirguispierre 2026-08-10 - i-outer streams each weight row contiguously
+  // instead of striding by out_dim, worth ~14x; integer sums are associative so
+  // the totals are unchanged
+  if ((int)acc32.size() < out_dim)
+    acc32.resize(out_dim);
+  int32_t *acc = acc32.data();
+  memset(acc, 0, out_dim * sizeof(int32_t));
 
-  for (int j = 0; j < out_dim; ++j) {
-    int32_t acc = 0;
-    for (int i = 0; i < in_dim; ++i) {
-      int8_t xv = x_q[i];
-      int8_t wv = w.data[i * out_dim + j];
-
-      if (wv == 1)
-        acc += xv;
-      else if (wv == -1)
-        acc -= xv;
-    }
-    // 3. Dequantize
-    // out = (acc / x_scale) * w_scale
-    float val = ((float)acc / quant_scale) * w.scale;
-    out[j] = val;
-
-    // Debug first few outputs of first layer
-    static int debug_count = 0;
-    if (debug_count < 5) {
-      // print diagnostics for first few calls
-      if (j == 0) {
-        cout << "[BitLinear Debug] Dim In: " << in_dim << " Out: " << out_dim
-             << endl;
-        cout << "  Input Max: " << max_val << " Quant Scale: " << quant_scale
-             << " RMS: " << rms << endl;
-        cout << "  Weight Scale: " << w.scale << endl; // Check if this is 0
-        cout << "  Acc: " << acc << " Dequant: " << val << endl;
-        cout << "  Sample W: " << (int)w.data[0] << " " << (int)w.data[1]
-             << endl;
-        cout << "  Sample X_Q: " << (int)x_q[0] << " " << (int)x_q[1] << endl;
-        debug_count++;
-      }
-    }
+  for (int i = 0; i < in_dim; ++i) {
+    int32_t xv = x_q[i];
+    if (xv == 0)
+      continue; // free sparsity: skip the whole row
+    const int8_t *wrow = &w.data[(size_t)i * out_dim];
+    // guirguispierre 2026-08-10 - w is {-1,0,1} so the multiply is the add/sub
+    // and vectorizes; the branchy form stalls on mispredicts
+    for (int j = 0; j < out_dim; ++j)
+      acc[j] += wrow[j] * xv;
   }
+
+  // 3. Dequantize
+  // out = (acc / x_scale) * w_scale
+  for (int j = 0; j < out_dim; ++j)
+    out[j] = ((float)acc[j] / quant_scale) * w.scale;
+}
+
+// guirguispierre 2026-08-10 - full float32 precision so tools/parity_check.py
+// can diff values exactly rather than by eye
+void print_tensor(const char *name, const vector<float> &v, int count = 10) {
+  int n = min((int)v.size(), count);
+  cout << "[" << name << "] n=" << v.size() << " ";
+  cout << std::setprecision(9);
+  for (int i = 0; i < n; ++i)
+    cout << v[i] << (i + 1 < n ? " " : "");
+  cout << endl;
 }
 
 // Softmax
@@ -274,6 +278,7 @@ struct Workspace {
   vector<float> fc_act, mlp_out;
   vector<float> xt, xn;
   vector<int8_t> scratch_q;
+  vector<int32_t> acc32;
 
   void ensure_size(int max_seq_len, int dim) {
     int max_el = max_seq_len * dim;
@@ -339,13 +344,10 @@ void forward(AtomicModel &model, const vector<int> &tokens,
   }
 
   // Print Embedding Sum (last token)
-  // if (parity_mode) {
-  //   int last_idx = (seq_len - 1) * dim;
-  //   // Define a vector to copy so we can use print_tensor
-  //   vector<float> tmp(dim);
-  //   memcpy(tmp.data(), &ws.X[last_idx], dim * sizeof(float));
-  //   print_tensor("Embedding_Sum", tmp);
-  // }
+  if (parity_mode) {
+    vector<float> tmp(&ws.X[(seq_len - 1) * dim], &ws.X[seq_len * dim]);
+    print_tensor("Embedding_Sum", tmp, dim);
+  }
 
   int l_idx = 0;
   for (auto &layer : model.layers) {
@@ -356,22 +358,19 @@ void forward(AtomicModel &model, const vector<int> &tokens,
       memcpy(&ws.X_norm[t * dim], ws.xn.data(), dim * sizeof(float));
     }
 
-    // if (parity_mode) {
-    //   int last_idx = (seq_len - 1) * dim;
-    //   vector<float> tmp(dim);
-    //   memcpy(tmp.data(), &ws.X_norm[last_idx], dim * sizeof(float));
-    //   // Construct string layer0_LN1
-    //   string name = "Layer" + to_string(l_idx) + "_LN1";
-    //   print_tensor(name.c_str(), tmp);
-    // }
+    if (parity_mode) {
+      vector<float> tmp(&ws.X_norm[(seq_len - 1) * dim],
+                        &ws.X_norm[seq_len * dim]);
+      print_tensor(("Layer" + to_string(l_idx) + "_LN1").c_str(), tmp, dim);
+    }
 
     // Attention
     for (int t = 0; t < seq_len; ++t) {
       memcpy(ws.xt.data(), &ws.X_norm[t * dim], dim * sizeof(float));
 
-      bit_linear(ws.xt, layer.q_w, ws.q, ws.scratch_q);
-      bit_linear(ws.xt, layer.k_w, ws.k, ws.scratch_q);
-      bit_linear(ws.xt, layer.v_w, ws.v, ws.scratch_q);
+      bit_linear(ws.xt, layer.q_w, ws.q, ws.scratch_q, ws.acc32);
+      bit_linear(ws.xt, layer.k_w, ws.k, ws.scratch_q, ws.acc32);
+      bit_linear(ws.xt, layer.v_w, ws.v, ws.scratch_q, ws.acc32);
 
       memcpy(&ws.Q[t * dim], ws.q.data(), dim * sizeof(float));
       memcpy(&ws.K[t * dim], ws.k.data(), dim * sizeof(float));
@@ -410,24 +409,18 @@ void forward(AtomicModel &model, const vector<int> &tokens,
     // O Proj
     for (int t = 0; t < seq_len; ++t) {
       memcpy(ws.xt.data(), &ws.AttnOut[t * dim], dim * sizeof(float));
-      bit_linear(ws.xt, layer.o_w, ws.layer_out, ws.scratch_q);
+      bit_linear(ws.xt, layer.o_w, ws.layer_out, ws.scratch_q, ws.acc32);
 
       // Residual
       for (int i = 0; i < dim; ++i)
         ws.X[t * dim + i] += ws.layer_out[i];
     }
 
-    // if (parity_mode) {
-    //   // We want to print Attn Output (Residual Added? Python script prints
-    //   // `attn_out` BEFORE residual add) Wait, python script printed
-    //   `attn_out =
-    //   // layer.attn(x_norm)`. Here `ws.layer_out` is `attn_out`. But we just
-    //   // added it to X. We have it in `ws.layer_out`. Assuming seq_len=1 for
-    //   // parity check usually. If seq_len > 1, this only captures the LAST
-    //   // token's execution in that loop.
-    //   string name = "Layer" + to_string(l_idx) + "_Attn_Out";
-    //   print_tensor(name.c_str(), ws.layer_out);
-    // }
+    // guirguispierre 2026-08-10 - layer_out is pre-residual here, matching what
+    // tools/parity_check.py prints on the python side
+    if (parity_mode)
+      print_tensor(("Layer" + to_string(l_idx) + "_Attn_Out").c_str(),
+                   ws.layer_out, dim);
 
     // MLP
     for (int t = 0; t < seq_len; ++t) {
@@ -442,21 +435,19 @@ void forward(AtomicModel &model, const vector<int> &tokens,
       // }
 
       int hidden = 4 * dim;
-      bit_linear(ws.xn, layer.fc1_w, ws.fc_act, ws.scratch_q);
+      bit_linear(ws.xn, layer.fc1_w, ws.fc_act, ws.scratch_q, ws.acc32);
       for (int i = 0; i < hidden; ++i)
         ws.fc_act[i] = gelu(ws.fc_act[i]);
 
-      bit_linear(ws.fc_act, layer.fc2_w, ws.mlp_out, ws.scratch_q);
+      bit_linear(ws.fc_act, layer.fc2_w, ws.mlp_out, ws.scratch_q, ws.acc32);
 
       for (int i = 0; i < dim; ++i)
         ws.X[t * dim + i] += ws.mlp_out[i];
     }
 
-    // if (parity_mode) {
-    //   string name = "Layer" + to_string(l_idx) + "_MLP_Out";
-    //   print_tensor(name.c_str(), ws.mlp_out);
-    //   cout << endl; // Separator
-    // }
+    if (parity_mode)
+      print_tensor(("Layer" + to_string(l_idx) + "_MLP_Out").c_str(),
+                   ws.mlp_out, dim);
 
     l_idx++;
   }
@@ -466,15 +457,13 @@ void forward(AtomicModel &model, const vector<int> &tokens,
   memcpy(ws.xt.data(), &ws.X[last_t * dim], dim * sizeof(float));
   rms_norm(ws.xt, model.ln_f.data, ws.xn, dim);
 
-  // if (parity_mode) {
-  //   print_tensor("Final_LN", ws.xn);
-  // }
+  if (parity_mode)
+    print_tensor("Final_LN", ws.xn, dim);
 
-  bit_linear(ws.xn, model.head_w, logits, ws.scratch_q);
+  bit_linear(ws.xn, model.head_w, logits, ws.scratch_q, ws.acc32);
 
-  // if (parity_mode) {
-  //   print_tensor("Final_Logits", logits, 20);
-  // }
+  if (parity_mode)
+    print_tensor("Final_Logits", logits, (int)logits.size());
 }
 
 // Sampling: temperature + optional top-k + optional top-p (nucleus).
