@@ -1,0 +1,39 @@
+name: Auto Approve
+
+on:
+  pull_request_target:
+    types: [ opened, reopened, synchronize, ready_for_review ]
+    branches: [ master ]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  auto-approve:
+    name: Approve owner PRs
+    runs-on: ubuntu-latest
+    # Only the repository owner's PRs are approved here; anyone else's PR is
+    # left untouched so it still needs a manual review from @guirguispierre.
+    if: >-
+      github.event.pull_request.user.login == 'guirguispierre' &&
+      github.event.pull_request.draft == false
+
+    steps:
+    - name: Approve pull request
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        REPO: ${{ github.repository }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+      # master has dismiss_stale_reviews enabled, so an approval that a later
+      # push invalidated comes back as DISMISSED and is replaced on this run.
+      run: |
+        approvals=$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" --paginate \
+          --jq '[.[] | select(.user.login == "github-actions[bot]" and .state == "APPROVED")] | length')
+        if [ "$approvals" -gt 0 ]; then
+          echo "PR #$PR_NUMBER already approved by github-actions[bot], nothing to do."
+          exit 0
+        fi
+        gh pr review "$PR_NUMBER" --repo "$REPO" --approve \
+          --body "Auto-approved: pull request authored by repository owner @$PR_AUTHOR."
