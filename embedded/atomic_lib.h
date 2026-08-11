@@ -48,14 +48,15 @@ inline void softmax(vector<float> &x) {
 // Affine RMSNorm (used for the layer's ln1 / ln2 / ln_f).
 inline void rms_norm(const vector<float> &x, const vector<float> &w,
                      vector<float> &out, int dim) {
-  float ss = 0.0f;
+  // guirguispierre 2026-08-10 - double sum and a divide rather than a
+  // reciprocal multiply, to match atomic_runner.cpp and the python reference
+  double ss = 0.0;
   for (float f : x)
-    ss += f * f;
-  ss /= dim;
-  float rms = 1.0f / sqrt(ss + 1e-5f);
+    ss += (double)f * (double)f;
+  float rms = sqrt((float)(ss / dim) + 1e-5f);
 
   for (int i = 0; i < dim; ++i) {
-    out[i] = x[i] * rms * w[i];
+    out[i] = (x[i] / rms) * w[i];
   }
 }
 
@@ -79,10 +80,11 @@ inline void bit_linear(const vector<float> &x, const vector<int8_t> &w,
   int out_dim = (int)out.size();
 
   // SubLN
-  float ss = 0.0f;
+  // guirguispierre 2026-08-10 - double for the same reason as rms_norm
+  double ss = 0.0;
   for (float v : x)
-    ss += v * v;
-  float rms = sqrt(ss / in_dim + 1e-5f);
+    ss += (double)v * (double)v;
+  float rms = sqrt((float)(ss / in_dim) + 1e-5f);
 
   // Activation absmax over x/rms = max(|x|)/rms
   float max_abs = 0.0f;
@@ -93,11 +95,12 @@ inline void bit_linear(const vector<float> &x, const vector<int8_t> &w,
     max_val = 1e-5f;
 
   float scale_x = 127.0f / max_val;
-  float effective_scale = scale_x / rms;
 
+  // guirguispierre 2026-08-10 - divide before scaling to match
+  // activation_quant(); folding it into one multiply rounds differently
   vector<int8_t> x_q(in_dim);
   for (int i = 0; i < in_dim; ++i) {
-    float q = roundf(x[i] * effective_scale);
+    float q = roundf((x[i] / rms) * scale_x);
     if (q > 127.0f)
       q = 127.0f;
     if (q < -127.0f)
@@ -105,18 +108,22 @@ inline void bit_linear(const vector<float> &x, const vector<int8_t> &w,
     x_q[i] = (int8_t)q;
   }
 
-  float dequant = scale_w / scale_x;
-  for (int o = 0; o < out_dim; ++o) {
-    int32_t acc = 0;
-    for (int i = 0; i < in_dim; ++i) {
-      int8_t wv = w[i * out_dim + o];
-      if (wv == 1)
-        acc += x_q[i];
-      else if (wv == -1)
-        acc -= x_q[i];
-    }
-    out[o] = (float)acc * dequant;
+  // guirguispierre 2026-08-10 - i-outer streams each weight row contiguously
+  // instead of striding by out_dim, worth ~14x; integer sums are associative so
+  // the totals are unchanged
+  vector<int32_t> acc(out_dim, 0);
+  for (int i = 0; i < in_dim; ++i) {
+    int32_t xv = x_q[i];
+    if (xv == 0)
+      continue; // free sparsity: skip the whole row
+    const int8_t *wrow = &w[(size_t)i * out_dim];
+    for (int o = 0; o < out_dim; ++o)
+      acc[o] += wrow[o] * xv;
   }
+
+  float dequant = scale_w / scale_x;
+  for (int o = 0; o < out_dim; ++o)
+    out[o] = (float)acc[o] * dequant;
 }
 
 struct AtomicLayer {
