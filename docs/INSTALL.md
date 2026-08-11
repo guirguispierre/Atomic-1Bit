@@ -37,11 +37,28 @@ This installs:
 python3 -c "import torch; import tiktoken; print('Dependencies OK')"
 ```
 
-## C++ Runtime (Optional)
+## C++ Components
 
-The C++ inference engine is optional -- you only need it if you want to run models on bare metal or embedded devices.
+There are two separate C++ artifacts, and the first one is **not** optional.
 
-### Build the engine
+### 1. Ternary kernel (`libatomic.so`) -- required for Python inference
+
+`atomic_1bit/python/wrapper.py` loads this shared library, so
+`python3 atomic_1bit/python/inference.py` and the kernel parity tests fail
+without it:
+
+```bash
+cd atomic_1bit/core
+make                    # defaults to BACKEND=CPU
+```
+
+Verify:
+
+```bash
+test -f atomic_1bit/core/libatomic.so && echo "kernel built"
+```
+
+### 2. Bare-metal runner -- needed to run exported models standalone
 
 ```bash
 cd embedded
