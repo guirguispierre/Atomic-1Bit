@@ -80,7 +80,7 @@ Loads a binary model file produced by `atomic_1bit/utils/export_to_cpp.py` into 
 **Notes:**
 - The binary format does not include a magic-number check in this header version. The runner (`atomic_runner.cpp`) does validate the `ATOM` magic bytes and version before using this path.
 - Weights are stored in the following order: config header, optional gist vector, token embeddings, positional embeddings, per-layer weights (ln1, q/k/v/o, ln2, fc1, fc2), final norm, language model head.
-- Float tensors (`ln1`, `ln2`, `ln_f`, embeddings) are stored as raw `float32`. Ternary weight tensors are stored as raw `int8_t` with values in `{-1, 0, 1}`.
+- Float tensors (`ln1`, `ln2`, `ln_f`, embeddings) are stored as raw `float32`. Ternary weight tensors are packed four per byte on disk and unpacked into `int8_t` with values in `{-1, 0, 1}` at load time.
 - The caller is responsible for keeping `model` alive for as long as inference runs, since `forward` holds non-owning pointers into the vectors.
 
 ---
@@ -238,7 +238,7 @@ The `.bin` files produced by `export_to_cpp.py` and consumed by `atomic_runner.c
 | Offset | Size | Type | Description |
 |--------|------|------|-------------|
 | 0 | 4 | `int32` | Magic: `0x41544F4D` ("ATOM") |
-| 4 | 4 | `int32` | Version: `1` |
+| 4 | 4 | `int32` | Version: `2` |
 | 8 | 4 | `int32` | `vocab_size` |
 | 12 | 4 | `int32` | `dim` |
 | 16 | 4 | `int32` | `depth` |
@@ -250,19 +250,35 @@ The `.bin` files produced by `export_to_cpp.py` and consumed by `atomic_runner.c
 | ... | `max_seq_len * dim * 4` | `float32[]` | Positional embeddings |
 | ... | (repeated `depth` times) | — | Layer weights (see below) |
 | ... | `dim * 4` | `float32[]` | Final RMSNorm scale |
-| ... | `4 + dim * vocab_size` | `float32 + int8[]` | LM head (scale + ternary weights) |
+| ... | `4 + ceil(dim * vocab_size / 4)` | `float32 + packed[]` | LM head (scale + ternary weights) |
 
 Each layer block contains:
 
 | Size | Type | Description |
 |------|------|-------------|
 | `dim * 4` | `float32[]` | `ln1` scale |
-| `4 + dim * dim` | `float32 + int8[]` | Q projection (scale + weights) |
-| `4 + dim * dim` | `float32 + int8[]` | K projection (scale + weights) |
-| `4 + dim * dim` | `float32 + int8[]` | V projection (scale + weights) |
-| `4 + dim * dim` | `float32 + int8[]` | O projection (scale + weights) |
+| `4 + ceil(dim * dim / 4)` | `float32 + packed[]` | Q projection (scale + weights) |
+| `4 + ceil(dim * dim / 4)` | `float32 + packed[]` | K projection (scale + weights) |
+| `4 + ceil(dim * dim / 4)` | `float32 + packed[]` | V projection (scale + weights) |
+| `4 + ceil(dim * dim / 4)` | `float32 + packed[]` | O projection (scale + weights) |
 | `dim * 4` | `float32[]` | `ln2` scale |
-| `4 + dim * 4*dim` | `float32 + int8[]` | FC1 weight (scale + weights) |
-| `4 + 4*dim * dim` | `float32 + int8[]` | FC2 weight (scale + weights) |
+| `4 + ceil(dim * 4*dim / 4)` | `float32 + packed[]` | FC1 weight (scale + weights) |
+| `4 + ceil(4*dim * dim / 4)` | `float32 + packed[]` | FC2 weight (scale + weights) |
 
-Note: `atomic_lib.h` and `atomic_runner.cpp` read the same format, including the per-tensor `float32` scale prefix on every quantized weight tensor.
+### Ternary weight packing
+
+Version 2 stores four ternary weights per byte. Each weight is written as
+`w + 1`, so `{-1, 0, 1}` become codes `{0, 1, 2}` and code `3` never appears.
+Codes fill a byte from the low-order pair upward, following the flat row-major
+order of the `(in_dim, out_dim)` tensor; the final byte is zero-padded.
+
+To decode weight `i`:
+
+```cpp
+int8_t w = (int8_t)((packed[i >> 2] >> (2 * (i & 3))) & 3) - 1;
+```
+
+`atomic_lib.h` and `atomic_runner.cpp` unpack at load time, so `AtomicLayer`
+still exposes plain `vector<int8_t>` and the inner loop is unchanged. The ESP32
+port decodes while streaming from flash instead, which is where the 4x
+reduction in reads matters.

@@ -22,7 +22,7 @@ weight ==  0  ->  skip  (free sparsity)
 The result is a full transformer that runs on **integer arithmetic only**. No CUDA required. No FP16. No matrix multiply units. Just `add` and `sub` instructions that work on any processor manufactured in the last 30 years.
 
 **This matters because:**
-- A 6.85M parameter model drops from **27.4 MB to 10.1 MB** (-63%)
+- A 6.85M parameter model drops from **27.4 MB to 5.8 MB** (-79%)
 - The C++ runtime has **zero external dependencies** -- it's a single binary
 - It runs on a **Raspberry Pi**, an **ESP32**, or a **2015 laptop**
 - The ternary kernel is **bit-exact** against the NumPy reference, and the C++
@@ -40,7 +40,7 @@ Quick Start config below (256d, 6 layers, 4 heads, 4096 vocab, 6.85M params):
 
 | Metric | FP32 Baseline | Atomic-1Bit | Improvement |
 |:---|:---|:---|:---|
-| **Model Size** | 27.4 MB | **10.1 MB** | **-63%** |
+| **Model Size** | 27.4 MB | **5.8 MB** | **-79%** |
 | **Parameters** | 6.85M | 6.85M | Same |
 | **Precision** | Float32 | Ternary {-1, 0, 1} | -- |
 | **Throughput (C++)** | N/A | **~170-185 TPS** | Portable runtime |
@@ -194,20 +194,22 @@ examples/         Runnable example scripts
 
 | Config | Parameters | Exported size | Dimensions | Use Case |
 |:---|:---|:---|:---|:---|
-| [`pocket_4k`](configs/pocket_4k.yaml) | 5.28M | 8.5 MB | 256d, 4L, 4H, 4K vocab | Smallest preset |
-| [`stories_base`](configs/stories_base.yaml) | 30.5M | 69.2 MB | 256d, 6L, 4H, 50257 vocab | Development / testing |
-| [`flagship_12m`](configs/flagship_12m.yaml) | 12.5M | 16.7 MB | 320d, 8L, 5H, 4K vocab | Quality demos |
+| [`pocket_4k`](configs/pocket_4k.yaml) | 5.28M | 5.4 MB | 256d, 4L, 4H, 4K vocab | Smallest preset |
+| [`stories_base`](configs/stories_base.yaml) | 30.5M | 56.0 MB | 256d, 6L, 4H, 50257 vocab | Development / testing |
+| [`flagship_12m`](configs/flagship_12m.yaml) | 12.5M | 8.4 MB | 320d, 8L, 5H, 4K vocab | Quality demos |
 | [`mixed_precision`](configs/mixed_precision.yaml) | Configurable | -- | Hybrid 1.58/4-bit | Experimental |
 
-Parameter counts are dominated by the token embedding table, which stays float32
-(`vocab_size x dim x 4` bytes) -- so vocabulary size, not depth, drives file
-size. `stories_base.yaml` ships with the 50257-entry GPT-2 vocabulary; the
-Quick Start above passes `--vocab_size 4096` instead, giving a 6.85M-parameter
-model that exports to 10.1 MB. Set the vocabulary deliberately for your target.
+Ternary weights are packed four per byte, so what dominates the file is now the
+token embedding table, which stays float32 (`vocab_size x dim x 4` bytes) --
+vocabulary size, not depth, drives size. `stories_base.yaml` ships with the
+50257-entry GPT-2 vocabulary; the Quick Start above passes `--vocab_size 4096`
+instead, giving a 6.85M-parameter model that exports to 5.8 MB. Set the
+vocabulary deliberately for your target.
 
-> None of these presets fit in ESP32 SRAM as-is. See
-> [embedded/ESP32_PORT_GUIDE.md](embedded/ESP32_PORT_GUIDE.md) for what actually
-> fits on-device.
+`pocket_4k` and `flagship_12m` now fit 8 MB ESP32 flash. Neither fits in SRAM,
+so on-device inference streams weights from flash: see
+[embedded/ESP32_PORT_GUIDE.md](embedded/ESP32_PORT_GUIDE.md). Quantizing the
+embedding table is the next lever if you need smaller.
 
 Load any config with:
 

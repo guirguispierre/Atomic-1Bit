@@ -5,6 +5,22 @@ All notable changes to Atomic-1Bit are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-08-10
+
+### Changed
+- **Binary format v2: ternary weights packed four per byte.** Weights are
+  written as `w + 1`, so `{-1, 0, 1}` become 2-bit codes `{0, 1, 2}`. This cuts
+  the ternary portion of an export by 4x: `pocket_4k` 8.5 MB -> 5.4 MB,
+  `flagship_12m` 16.7 MB -> 8.4 MB, and the Quick Start 6.85M model
+  10.1 MB -> 5.8 MB. `pocket_4k` and `flagship_12m` now fit ESP32 flash.
+  Both C++ loaders unpack at load, so the inner loop and throughput are
+  unchanged. `platforms/esp32/main.cpp` decodes while streaming, replacing one
+  flash seek per weight with one sequential read per weight row.
+- Loaders reject v1 files with a message pointing at the exporter. Re-export
+  any existing `.bin`.
+- `platforms/wasm` and `platforms/esp32` now validate the format version, which
+  neither did before.
+
 ## [1.4.0] - 2026-04-30
 
 ### Fixed
