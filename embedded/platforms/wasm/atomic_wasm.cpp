@@ -193,6 +193,8 @@ int init_model(const uint8_t *data, int data_len) {
 
     if (magic != 0x41544F4D)
         return -1; // Bad magic
+    if (version != 2)
+        return -1; // Format predates 2-bit weight packing
 
     // Read config (6 ints = 24 bytes)
     int32_t config[6];
@@ -233,12 +235,18 @@ int init_model(const uint8_t *data, int data_len) {
         offset += size * sizeof(float);
     };
 
+    // guirguispierre 2026-08-10 - weights arrive four per byte as w+1; unpack
+    // at load so the hot loop still sees a plain int8 array
     auto read_i8 = [&](TensorI8 *t, int rows, int cols) {
         alloc_tensor_i8(t, rows, cols);
         memcpy(&t->scale, data + offset, sizeof(float));
         offset += sizeof(float);
-        memcpy(t->data, data + offset, rows * cols);
-        offset += rows * cols;
+
+        int n = rows * cols;
+        const uint8_t *packed = data + offset;
+        for (int i = 0; i < n; ++i)
+            t->data[i] = (int8_t)((packed[i >> 2] >> (2 * (i & 3))) & 3) - 1;
+        offset += (n + 3) / 4;
     };
 
     // Layers

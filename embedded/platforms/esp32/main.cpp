@@ -38,6 +38,9 @@ static float x_norm[DIM];
 static float q_buf[DIM], k_buf[DIM], v_buf[DIM], o_buf[DIM];
 static int8_t x_q[DIM];
 static int8_t weight_row[HIDDEN_DIM]; // Largest row: fc1 output dim
+// guirguispierre 2026-08-10 - sized for the head, the widest bit_linear output
+static uint8_t packed_row[(VOCAB_SIZE + 3) / 4];
+static int32_t acc_buf[VOCAB_SIZE];
 static float fc_act[HIDDEN_DIM];
 static float mlp_out[DIM];
 static float logits[VOCAB_SIZE];
@@ -119,25 +122,31 @@ static void bit_linear_flash(const float *input, size_t weight_offset,
     model_file.read((uint8_t *)&w_scale, sizeof(float));
 
     // 3. Stream weights and compute
-    for (int j = 0; j < out_dim; j++) {
-        // Read one column of weights (in_dim bytes)
-        // Weights stored as (in_dim, out_dim) layout, so column j
-        // requires strided access. For sequential read, we process row by row.
-        int32_t acc = 0;
-        // For simplicity, read full weight block and access column
-        // In production, use packed 2-bit format for 4x less reads
-        size_t col_offset = weight_offset + sizeof(float) + j;
-        for (int i = 0; i < in_dim; i++) {
-            model_file.seek(col_offset + i * out_dim);
-            int8_t wv;
-            model_file.read((uint8_t *)&wv, 1);
-            if (wv == 1)
-                acc += x_q[i];
-            else if (wv == -1)
-                acc -= x_q[i];
+    // guirguispierre 2026-08-10 - weights are (in_dim, out_dim) row-major and
+    // packed four per byte, so one sequential read per row replaces the old
+    // per-element seek: in_dim reads instead of in_dim*out_dim
+    const size_t row_bytes = (out_dim + 3) / 4;
+    const size_t data_offset = weight_offset + sizeof(float);
+
+    for (int j = 0; j < out_dim; j++)
+        acc_buf[j] = 0;
+
+    model_file.seek(data_offset);
+    for (int i = 0; i < in_dim; i++) {
+        int32_t xv = x_q[i];
+        if (xv == 0) {
+            model_file.seek(data_offset + (size_t)(i + 1) * row_bytes);
+            continue; // free sparsity: skip the whole row
         }
-        output[j] = ((float)acc / quant_scale) * w_scale;
+        model_file.read(packed_row, row_bytes);
+        for (int j = 0; j < out_dim; j++) {
+            int8_t wv = (int8_t)((packed_row[j >> 2] >> (2 * (j & 3))) & 3) - 1;
+            acc_buf[j] += wv * xv;
+        }
     }
+
+    for (int j = 0; j < out_dim; j++)
+        output[j] = ((float)acc_buf[j] / quant_scale) * w_scale;
 }
 
 // --- Main ---
@@ -168,6 +177,11 @@ void setup() {
 
     if (magic != 0x41544F4D) {
         Serial.println("ERROR: Invalid model format (bad magic)");
+        return;
+    }
+
+    if (version != 2) {
+        Serial.printf("ERROR: model is v%d, this build needs v2\n", version);
         return;
     }
 
