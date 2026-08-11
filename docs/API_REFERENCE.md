@@ -128,7 +128,7 @@ Core BitLinear compute kernel. Implements one linear layer of the form: quantize
 2. Integer accumulation: `acc[o] += x_q[i] * w[i * out_dim + o]` (uses actual `int32_t` multiplication; no branch-on-sign optimization at this layer).
 3. Dequantize: `out[o] = acc[o] / scale`.
 
-**Known limitation:** The weight scale factor is not stored in the binary format used by `atomic_lib.h` and is therefore not applied during dequantization. The runner (`atomic_runner.cpp`) corrects this by reading and applying per-layer weight scales from the extended binary format written by `export_to_cpp.py`.
+Per-tensor `float32` weight scales are read from the binary and applied during dequantization, matching the Python `BitLinear` forward. `atomic_lib.h` and `atomic_runner.cpp` now consume the identical format written by `export_to_cpp.py`.
 
 ---
 
@@ -265,4 +265,4 @@ Each layer block contains:
 | `4 + dim * 4*dim` | `float32 + int8[]` | FC1 weight (scale + weights) |
 | `4 + 4*dim * dim` | `float32 + int8[]` | FC2 weight (scale + weights) |
 
-Note: `atomic_lib.h` uses an older format that does not include the per-layer scale prefix for weights. The `atomic_runner.cpp` binary uses the current format with scale values.
+Note: `atomic_lib.h` and `atomic_runner.cpp` read the same format, including the per-tensor `float32` scale prefix on every quantized weight tensor.
