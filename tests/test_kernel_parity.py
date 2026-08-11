@@ -86,3 +86,26 @@ class TestKernelParity:
         C = self.ternary_matmul(A, B)
         expected = -A.astype(np.int32).sum(axis=1, keepdims=True) * np.ones((1, 4), dtype=np.int32)
         np.testing.assert_array_equal(C, expected)
+
+    def test_int8_min_activation(self):
+        # guirguispierre 2026-08-10 - -128 against -1 is +128, which int8 cannot
+        # hold; K=64 keeps this on the vectorized path
+        A = np.full((1, 64), -128, dtype=np.int8)
+        B = np.full((64, 8), -1, dtype=np.int8)
+        C = self.ternary_matmul(A, B)
+        expected = A.astype(np.int32) @ B.astype(np.int32)
+        np.testing.assert_array_equal(C, expected)
+        assert C[0, 0] == 8192, "int8 overflow in the widening multiply"
+
+    def test_full_int8_activation_range(self):
+        rng = np.random.default_rng(0)
+        for _ in range(40):
+            K = int(rng.integers(1, 300))
+            N = int(rng.integers(1, 64))
+            A = rng.integers(-128, 128, size=(2, K)).astype(np.int8)
+            B = rng.integers(-1, 2, size=(K, N)).astype(np.int8)
+            np.testing.assert_array_equal(
+                self.ternary_matmul(A, B),
+                A.astype(np.int32) @ B.astype(np.int32),
+                err_msg=f"mismatch at K={K}, N={N}",
+            )
