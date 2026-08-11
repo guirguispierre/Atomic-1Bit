@@ -3,8 +3,9 @@ name: CI
 on:
   push:
     branches: [ master, feature/** ]
+  # guirguispierre 2026-08-10 - no branch filter, restricting to master meant a
+  # pr stacked on another pr's branch got no ci run
   pull_request:
-    branches: [ master ]
 
 jobs:
   test:
@@ -43,6 +44,19 @@ jobs:
       run: |
         test -f atomic_1bit/core/libatomic.so || (echo "libatomic.so not found!" && exit 1)
         ls -lh atomic_1bit/core/libatomic.so
+
+    - name: Build embedded C++ runner
+      run: |
+        cd embedded
+        g++ -O3 -std=c++17 atomic_runner.cpp -o runner
+        cd ..
+
+    - name: Verify runner was built
+      # guirguispierre 2026-08-10 - without this binary the parity tests skip
+      # silently and the claim goes unverified
+      run: |
+        test -f embedded/runner || (echo "embedded/runner not found!" && exit 1)
+        ./embedded/runner --help
 
     - name: Run linting - Black
       run: |
