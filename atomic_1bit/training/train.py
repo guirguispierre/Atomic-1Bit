@@ -65,10 +65,19 @@ class PocketStoriesDataset:
             print(f"Loading vocab map from {self.vocab_file}...")
             with open(self.vocab_file, 'r') as f:
                 data = json.load(f)
-                self.token_map = {int(k): v for k, v in data["token_map"].items()}
-                self.reverse_map = {int(k): v for k, v in data["reverse_map"].items()}
-            print(f"Loaded {len(self.token_map)} mapped tokens.")
-            return
+                token_map = {int(k): v for k, v in data["token_map"].items()}
+                reverse_map = {int(k): v for k, v in data["reverse_map"].items()}
+
+            # guirguispierre 2026-08-10 - the cache is not keyed by VOCAB_SIZE, so
+            # a map built for a larger vocab yields ids past the embedding table
+            if len(token_map) > VOCAB_SIZE - 1:
+                print(f"  Cached map has {len(token_map)} tokens but VOCAB_SIZE "
+                      f"is {VOCAB_SIZE}; rebuilding.")
+            else:
+                self.token_map = token_map
+                self.reverse_map = reverse_map
+                print(f"Loaded {len(self.token_map)} mapped tokens.")
+                return
 
         # 2. Build Frequency Map
         print("Building Frequency-Based Vocab (Scanning first 20k samples)...")
