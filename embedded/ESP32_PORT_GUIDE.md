@@ -1,17 +1,20 @@
 # Atomic-1Bit: ESP32 Porting Guide
 
 ## 1. Memory Analysis
-Your model has **~28 Million Parameters**.
 
 ### Storage (Flash/SD)
-- **Current (Int8)**: 28MB.
-- **Max ESP32 Flash**: 16MB (Typical S3 is 8MB or 16MB).
-- **Conclusion**: You CANNOT store the raw Int8 model on internal Flash.
-- **Solution A**: Use an SD Card (Supports 32GB+).
-- **Solution B (BitNet)**: 1.58-bit packing.
-  - 1 weight = 2 bits (00, 01, 10, 11).
-  - 28M * 2 bits = 56M bits = **7MB**.
-  - **Result**: Packed model FITS on 8MB/16MB Flash!
+Format v2 packs ternary weights four per byte, so the exported `.bin` is what
+you flash directly. Measured sizes:
+
+| Config | Exported | Fits 8MB flash | Fits 16MB flash |
+|:---|---:|:---|:---|
+| `pocket_4k` (5.28M params) | 5.4 MB | yes | yes |
+| `flagship_12m` (12.5M params) | 8.4 MB | no | yes |
+| `stories_base` (30.5M params, 50257 vocab) | 56.0 MB | no | no (use an SD card) |
+
+What remains is the float32 token embedding table, which is now the larger half
+of the file: `vocab_size * dim * 4` bytes. Quantizing it is the next lever if
+you need to go smaller.
 
 ### RAM (Runtime)
 - **Activations**: 
@@ -21,9 +24,11 @@ Your model has **~28 Million Parameters**.
   - `256 * 128 * 4` = ~131KB.
   - **Result**: Fits easily in ESP32 SRAM (512KB).
 - **Weights (Loading)**:
-  - You cannot load all 28MB (or 7MB) into RAM.
+  - Still too large for SRAM even packed.
   - **Strategy**: **Stream weights layer-by-layer.**
   - Load Layer 0 -> Compute -> Discard -> Load Layer 1 -> ...
+  - `platforms/esp32/main.cpp` reads one packed weight row per call, so a
+    row of `out_dim` weights costs `out_dim / 4` bytes of flash read.
 
 ## 2. Porting Strategy
 
