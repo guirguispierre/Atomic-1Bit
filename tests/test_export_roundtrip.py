@@ -7,12 +7,14 @@ The C++ loader (embedded/atomic_lib.h, embedded/atomic_runner.cpp) reads:
   pos_emb  : ctx*dim x float32
   per layer:
     ln1:        dim x float32
-    q/k/v/o:    each prefixed by float32 scale, then dim*dim x int8
+    q/k/v/o:    each prefixed by float32 scale, then ceil(dim*dim / 4) bytes
     ln2:        dim x float32
-    fc1:        float32 scale + (dim * 4*dim) int8
-    fc2:        float32 scale + (4*dim * dim) int8
+    fc1:        float32 scale + ceil(dim * 4*dim / 4) bytes
+    fc2:        float32 scale + ceil(4*dim * dim / 4) bytes
   ln_f:       dim x float32
-  head:       float32 scale + (dim * vocab) int8
+  head:       float32 scale + ceil(dim * vocab / 4) bytes
+
+Ternary weights are packed four per byte as w + 1 (format version 2).
 
 This test parses an exported binary using exactly that layout and asserts
 that every field arrives where the C++ loader expects it. If the exporter
@@ -23,19 +25,24 @@ import struct
 import tempfile
 import math
 
+import numpy as np
 import pytest
 import torch
 
 from atomic_1bit.model.transformer import AtomicTransformer, AtomicConfig
-from atomic_1bit.utils.export_to_cpp import export_model
+from atomic_1bit.utils.export_to_cpp import export_model, pack_ternary, unpack_ternary
 
 
 def _read_floats(f, n):
     return struct.unpack(f"{n}f", f.read(4 * n))
 
 
-def _read_int8s(f, n):
-    return f.read(n)
+def _packed_bytes(n):
+    return (n + 3) // 4
+
+
+def _read_packed(f, n):
+    return f.read(_packed_bytes(n))
 
 
 def parse_binary(path):
@@ -71,22 +78,28 @@ def parse_binary(path):
 
             for name in ("q", "k", "v", "o"):
                 (scale,) = struct.unpack("f", f.read(4))
-                weights = _read_int8s(f, dim * dim)
-                assert len(weights) == dim * dim, f"layer {i} {name}_w truncated"
+                weights = _read_packed(f, dim * dim)
+                assert len(weights) == _packed_bytes(dim * dim), (
+                    f"layer {i} {name}_w truncated"
+                )
                 layer[f"{name}_scale"] = scale
                 layer[f"{name}_w_len"] = len(weights)
 
             layer["ln2"] = _read_floats(f, dim)
 
             (fc1_scale,) = struct.unpack("f", f.read(4))
-            fc1_w = _read_int8s(f, dim * 4 * dim)
-            assert len(fc1_w) == dim * 4 * dim, f"layer {i} fc1_w truncated"
+            fc1_w = _read_packed(f, dim * 4 * dim)
+            assert len(fc1_w) == _packed_bytes(dim * 4 * dim), (
+                f"layer {i} fc1_w truncated"
+            )
             layer["fc1_scale"] = fc1_scale
             layer["fc1_w_len"] = len(fc1_w)
 
             (fc2_scale,) = struct.unpack("f", f.read(4))
-            fc2_w = _read_int8s(f, 4 * dim * dim)
-            assert len(fc2_w) == 4 * dim * dim, f"layer {i} fc2_w truncated"
+            fc2_w = _read_packed(f, 4 * dim * dim)
+            assert len(fc2_w) == _packed_bytes(4 * dim * dim), (
+                f"layer {i} fc2_w truncated"
+            )
             layer["fc2_scale"] = fc2_scale
             layer["fc2_w_len"] = len(fc2_w)
 
@@ -96,10 +109,11 @@ def parse_binary(path):
         out["ln_f"] = _read_floats(f, dim)
 
         (head_scale,) = struct.unpack("f", f.read(4))
-        head_w = _read_int8s(f, dim * vocab)
-        assert len(head_w) == dim * vocab, "head_w truncated"
+        head_w = _read_packed(f, dim * vocab)
+        assert len(head_w) == _packed_bytes(dim * vocab), "head_w truncated"
         out["head_scale"] = head_scale
         out["head_w_len"] = len(head_w)
+        out["head_w"] = head_w
 
         # Make sure there are no unexpected trailing bytes; the C++ loader
         # would silently leave them, but their presence means the writer
@@ -132,7 +146,7 @@ def test_layout_matches_loader(tmp_bin):
     parsed = parse_binary(tmp_bin)
 
     assert parsed["magic"] == 0x41544F4D
-    assert parsed["version"] == 1
+    assert parsed["version"] == 2
     assert parsed["vocab"] == cfg.vocab_size
     assert parsed["dim"] == cfg.dim
     assert parsed["depth"] == cfg.depth
@@ -150,7 +164,7 @@ def test_per_tensor_scales_are_finite_and_positive(tmp_bin):
     export_model(model, tmp_bin)
     parsed = parse_binary(tmp_bin)
 
-    suspicious = {0x41544F4D, 1}
+    suspicious = {0x41544F4D, 2}
     for i, layer in enumerate(parsed["layers"]):
         for key in ("q_scale", "k_scale", "v_scale", "o_scale", "fc1_scale", "fc2_scale"):
             s = layer[key]
@@ -181,17 +195,54 @@ def test_byte_count_matches_expected(tmp_bin):
     expected += (v * d + ctx * d) * 4
     # Per layer
     per_layer = (
-        d * 4                    # ln1
-        + 4 * (4 + d * d)        # q/k/v/o: scale + int8 weights
-        + d * 4                  # ln2
-        + (4 + d * hidden)       # fc1
-        + (4 + hidden * d)       # fc2
+        d * 4                                      # ln1
+        + 4 * (4 + _packed_bytes(d * d))           # q/k/v/o: scale + weights
+        + d * 4                                    # ln2
+        + (4 + _packed_bytes(d * hidden))          # fc1
+        + (4 + _packed_bytes(hidden * d))          # fc2
     )
     expected += L * per_layer
     # ln_f + head
-    expected += d * 4 + (4 + d * v)
+    expected += d * 4 + (4 + _packed_bytes(d * v))
 
     assert actual == expected, (
         f"file size {actual} != computed {expected}; "
         "exporter and loader format are out of sync"
     )
+
+
+class TestTernaryPacking:
+    @pytest.mark.parametrize("n", [1, 2, 3, 4, 5, 7, 8, 63, 64, 65, 4096])
+    def test_roundtrip_is_lossless(self, n):
+        rng = np.random.default_rng(n)
+        w = rng.integers(-1, 2, size=n).astype(np.int8)
+        assert np.array_equal(unpack_ternary(pack_ternary(w).tobytes(), n), w)
+
+    @pytest.mark.parametrize("n", [1, 3, 4, 5, 4096])
+    def test_uses_a_quarter_byte_per_weight(self, n):
+        w = np.zeros(n, dtype=np.int8)
+        assert pack_ternary(w).size == (n + 3) // 4
+
+    def test_unused_code_never_appears(self):
+        # guirguispierre 2026-08-10 - w+1 spans 0..2, so code 3 in the stream
+        # means a weight escaped the [-1,1] clamp
+        rng = np.random.default_rng(0)
+        w = rng.integers(-1, 2, size=10000).astype(np.int8)
+        b = np.frombuffer(pack_ternary(w).tobytes(), dtype=np.uint8)
+        codes = np.concatenate([b & 3, (b >> 2) & 3, (b >> 4) & 3, (b >> 6) & 3])
+        assert not (codes == 3).any()
+
+    def test_padding_bits_are_zero(self):
+        w = np.array([1, 1], dtype=np.int8)
+        (byte,) = pack_ternary(w)
+        assert byte >> 4 == 0
+
+    def test_exported_weights_are_only_ternary(self, tmp_bin):
+        model, cfg = _make_model()
+        export_model(model, tmp_bin)
+        parsed = parse_binary(tmp_bin)
+
+        n = cfg.dim * cfg.vocab_size
+        head = unpack_ternary(parsed["head_w"], n)
+        assert head.size == n
+        assert set(np.unique(head).tolist()) <= {-1, 0, 1}

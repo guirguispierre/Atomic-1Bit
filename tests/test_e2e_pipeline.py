@@ -147,7 +147,7 @@ class TestE2EPipeline:
         )
 
     def test_export_binary_version(self, tmp_path):
-        """Exported binary header version field must equal 1."""
+        """Exported binary header version field must equal 2."""
         model = AtomicTransformer(E2E_CONFIG)
         bin_path = tmp_path / "model.bin"
         export_model(model, str(bin_path))
@@ -155,7 +155,7 @@ class TestE2EPipeline:
         with open(str(bin_path), "rb") as f:
             _magic, version = struct.unpack("ii", f.read(8))
 
-        assert version == 1
+        assert version == 2
 
     def test_export_binary_header_dimensions(self, tmp_path):
         """Exported header dimensions must match the model config."""
@@ -221,7 +221,7 @@ class TestE2EPipeline:
             )
 
         assert magic == ATOM_MAGIC
-        assert version == 1
+        assert version == 2
         assert vocab == E2E_CONFIG.vocab_size
         assert dim == E2E_CONFIG.dim
 

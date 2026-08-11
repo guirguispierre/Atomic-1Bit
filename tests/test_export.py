@@ -29,7 +29,7 @@ class TestExportModel:
             with open(path, "rb") as f:
                 magic, version = struct.unpack("ii", f.read(8))
             assert magic == 0x41544F4D  # 'ATOM'
-            assert version == 1
+            assert version == 2
         finally:
             os.unlink(path)
 
