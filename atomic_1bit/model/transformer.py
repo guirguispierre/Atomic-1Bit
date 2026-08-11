@@ -90,7 +90,9 @@ class BitFeedForward(nn.Module):
         hidden_dim = 4 * config.dim
         self.fc1 = BitLinear(config.dim, hidden_dim, bias=False)
         self.fc2 = BitLinear(hidden_dim, config.dim, bias=False)
-        self.act = nn.GELU()
+        # guirguispierre 2026-08-10 - must match the tanh gelu in
+        # embedded/atomic_runner.cpp or python and c++ output diverge
+        self.act = nn.GELU(approximate="tanh")
 
     def forward(self, x):
         return self.fc2(self.act(self.fc1(x)))
