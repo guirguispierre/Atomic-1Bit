@@ -36,33 +36,36 @@ void ternary_matmul(const int8_t *A, const int8_t *B_transposed, int32_t *C,
       int32x4_t v_acc0 = vdupq_n_s32(0);
       int32x4_t v_acc1 = vdupq_n_s32(0);
 
+      // guirguispierre 2026-08-10 - vmull_s8 widens to int16 because vmulq_s8
+      // truncates: activation -128 against weight -1 wraps and flips the sum
+
       // Process 32 items at a time (2x unrolled from 16)
       for (; k <= K - 32; k += 32) {
         // First 16 elements
         int8x16_t va0 = vld1q_s8(val_a + k);
         int8x16_t vb0 = vld1q_s8(val_b + k);
-        int8x16_t vprod0 = vmulq_s8(va0, vb0);
-        int16x8_t v_pair0 = vpaddlq_s8(vprod0);
-        int32x4_t v_quad0 = vpaddlq_s16(v_pair0);
-        v_acc0 = vaddq_s32(v_acc0, v_quad0);
+        v_acc0 = vaddq_s32(
+            v_acc0, vpaddlq_s16(vmull_s8(vget_low_s8(va0), vget_low_s8(vb0))));
+        v_acc0 = vaddq_s32(
+            v_acc0, vpaddlq_s16(vmull_s8(vget_high_s8(va0), vget_high_s8(vb0))));
 
         // Second 16 elements
         int8x16_t va1 = vld1q_s8(val_a + k + 16);
         int8x16_t vb1 = vld1q_s8(val_b + k + 16);
-        int8x16_t vprod1 = vmulq_s8(va1, vb1);
-        int16x8_t v_pair1 = vpaddlq_s8(vprod1);
-        int32x4_t v_quad1 = vpaddlq_s16(v_pair1);
-        v_acc1 = vaddq_s32(v_acc1, v_quad1);
+        v_acc1 = vaddq_s32(
+            v_acc1, vpaddlq_s16(vmull_s8(vget_low_s8(va1), vget_low_s8(vb1))));
+        v_acc1 = vaddq_s32(
+            v_acc1, vpaddlq_s16(vmull_s8(vget_high_s8(va1), vget_high_s8(vb1))));
       }
 
       // Handle remaining 16-element block
       for (; k <= K - 16; k += 16) {
         int8x16_t va = vld1q_s8(val_a + k);
         int8x16_t vb = vld1q_s8(val_b + k);
-        int8x16_t vprod = vmulq_s8(va, vb);
-        int16x8_t v_pair = vpaddlq_s8(vprod);
-        int32x4_t v_quad = vpaddlq_s16(v_pair);
-        v_acc0 = vaddq_s32(v_acc0, v_quad);
+        v_acc0 = vaddq_s32(
+            v_acc0, vpaddlq_s16(vmull_s8(vget_low_s8(va), vget_low_s8(vb))));
+        v_acc0 = vaddq_s32(
+            v_acc0, vpaddlq_s16(vmull_s8(vget_high_s8(va), vget_high_s8(vb))));
       }
 
       // Combine accumulators
