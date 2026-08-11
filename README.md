@@ -22,10 +22,12 @@ weight ==  0  ->  skip  (free sparsity)
 The result is a full transformer that runs on **integer arithmetic only**. No CUDA required. No FP16. No matrix multiply units. Just `add` and `sub` instructions that work on any processor manufactured in the last 30 years.
 
 **This matters because:**
-- A 1.33M parameter model drops from **5.3 MB to 2.0 MB** (-62%)
+- A 6.85M parameter model drops from **27.4 MB to 10.1 MB** (-63%)
 - The C++ runtime has **zero external dependencies** -- it's a single binary
 - It runs on a **Raspberry Pi**, an **ESP32**, or a **2015 laptop**
-- The Python training stack and C++ inference engine produce **bit-exact identical output**
+- The ternary kernel is **bit-exact** against the NumPy reference, and the C++
+  engine tracks the PyTorch model to float32 precision (see
+  [Numerical parity](#numerical-parity))
 
 > This is experimental research software. It works, it's verified, and it's honest about what it is: a proof that useful AI inference doesn't require expensive hardware.
 
@@ -33,15 +35,20 @@ The result is a full transformer that runs on **integer arithmetic only**. No CU
 
 ## Performance
 
-Benchmarked on Apple M-series, single thread, sequence length 128, 50 generated tokens:
+Benchmarked on Apple M-series, single thread, 50 generated tokens, using the
+Quick Start config below (256d, 6 layers, 4 heads, 4096 vocab, 6.85M params):
 
-| Metric | FP16 Baseline | Atomic-1Bit | Improvement |
+| Metric | FP32 Baseline | Atomic-1Bit | Improvement |
 |:---|:---|:---|:---|
-| **Model Size** | 5.3 MB | **2.0 MB** | **-62%** |
-| **Parameters** | 1.33M | 1.33M | Same |
-| **Precision** | Float16 | Ternary {-1, 0, 1} | -- |
-| **Throughput (C++)** | N/A | **~160-170 TPS** | Portable runtime |
-| **Throughput (Python)** | ~826 TPS | ~130 TPS | Unoptimized |
+| **Model Size** | 27.4 MB | **10.1 MB** | **-63%** |
+| **Parameters** | 6.85M | 6.85M | Same |
+| **Precision** | Float32 | Ternary {-1, 0, 1} | -- |
+| **Throughput (C++)** | N/A | **~170-185 TPS** | Portable runtime |
+
+The C++ runner recomputes the full prefix each step rather than keeping a
+KV-cache, so throughput falls off as the sequence grows -- generation is
+O(n^2) in the number of tokens. The Python path (`AtomicTransformer.generate`)
+*does* cache. Reproduce with `benchmarks/run_suite.py`.
 
 <details>
 <summary>Visual benchmarks</summary>
@@ -68,6 +75,14 @@ Benchmarked on Apple M-series, single thread, sequence length 128, 50 generated 
 git clone https://github.com/guirguispierre/Atomic-1Bit.git
 cd Atomic-1Bit
 pip install -r requirements.txt
+```
+
+### Build the ternary kernel
+
+The Python inference path loads a shared library, so build it first:
+
+```bash
+make -C atomic_1bit/core          # produces atomic_1bit/core/libatomic.so
 ```
 
 ### Verify the kernel works
@@ -117,9 +132,33 @@ The project has three components:
 
 1. **Research stack** (`atomic_1bit/`) -- PyTorch training, evaluation, and model architecture. Train on TinyStories or Alpaca-cleaned datasets with thermal safety monitoring, gradient accumulation, and cosine scheduling.
 
-2. **Bare-metal runtime** (`embedded/`) -- Standalone C++ inference engine with zero dependencies. Supports CPU, Metal (Apple Silicon), and CUDA backends through conditional compilation. Produces bit-exact output matching the Python reference.
+2. **Bare-metal runtime** (`embedded/`) -- Standalone C++ inference engine with zero dependencies. Supports CPU, Metal (Apple Silicon), and CUDA backends through conditional compilation.
 
 3. **Gist tokens** -- Pre-computed "thought vectors" that compress a system prompt into a single embedding, injected into the attention stream at zero inference cost.
+
+### Numerical parity
+
+Two different guarantees are worth separating, because only one of them is exact:
+
+| Claim | Status | Verified by |
+|:---|:---|:---|
+| C++ ternary kernel == NumPy int32 reference | **Bit-exact** | `tests/test_kernel_parity.py` |
+| C++ engine == PyTorch model, whole forward pass | Agrees to float32 precision | `tests/test_cpp_runtime_parity.py` |
+
+Whole-model bit-equality is *not* achievable by design, and the reason is worth
+knowing before you go hunting for a bug. Activations are quantized with a
+per-tensor scale derived from a max over float values. `round()` is
+discontinuous, so a last-ULP difference anywhere upstream -- summation order in
+an RMS norm, a `tanh` implementation -- can push one value across a `.5`
+boundary. That shifts a single int8 by one step, which is a *discrete* jump in
+the accumulator, not an epsilon. Deeper models give this more chances to happen.
+
+In practice a shallow model matches PyTorch to ~1e-7 relative, and deeper ones
+stay within a few percent with the same next-token prediction. Greedy decoding
+can still fork after enough steps once two logits are near-tied. The test suite
+pins both bounds, so a genuine mismatch -- a different activation function,
+scale convention, or weight layout -- fails loudly instead of hiding in the
+noise.
 
 ![Ternary Matmul Diagram](assets/diagram_ternary_matmul_1765658104682.png)
 
@@ -143,7 +182,7 @@ atomic_1bit/
 embedded/         Standalone C++ runner + ESP32 port guide
 configs/          Model presets (4K pocket to 12.5M flagship)
 benchmarks/       Reproducible benchmark suite vs FP16 baselines
-tests/            67 pytest tests for correctness verification
+tests/            149 pytest tests for correctness verification
 scripts/          Plotting, evaluation, and reproduction scripts
 docs/             Installation, usage, commands, benchmarking guides
 examples/         Runnable example scripts
@@ -153,12 +192,22 @@ examples/         Runnable example scripts
 
 ## Model Configurations
 
-| Config | Parameters | Dimensions | Use Case |
-|:---|:---|:---|:---|
-| [`pocket_4k`](configs/pocket_4k.yaml) | ~100K | 256d, 4L, 4H | ESP32 / microcontrollers |
-| [`stories_base`](configs/stories_base.yaml) | ~1.33M | 256d, 6L, 4H | Development / testing |
-| [`flagship_12m`](configs/flagship_12m.yaml) | ~12.5M | 320d, 8L, 5H | Quality demos |
-| [`mixed_precision`](configs/mixed_precision.yaml) | Configurable | Hybrid 1.58/4-bit | Experimental |
+| Config | Parameters | Exported size | Dimensions | Use Case |
+|:---|:---|:---|:---|:---|
+| [`pocket_4k`](configs/pocket_4k.yaml) | 5.28M | 8.5 MB | 256d, 4L, 4H, 4K vocab | Smallest preset |
+| [`stories_base`](configs/stories_base.yaml) | 30.5M | 69.2 MB | 256d, 6L, 4H, 50257 vocab | Development / testing |
+| [`flagship_12m`](configs/flagship_12m.yaml) | 12.5M | 16.7 MB | 320d, 8L, 5H, 4K vocab | Quality demos |
+| [`mixed_precision`](configs/mixed_precision.yaml) | Configurable | -- | Hybrid 1.58/4-bit | Experimental |
+
+Parameter counts are dominated by the token embedding table, which stays float32
+(`vocab_size x dim x 4` bytes) -- so vocabulary size, not depth, drives file
+size. `stories_base.yaml` ships with the 50257-entry GPT-2 vocabulary; the
+Quick Start above passes `--vocab_size 4096` instead, giving a 6.85M-parameter
+model that exports to 10.1 MB. Set the vocabulary deliberately for your target.
+
+> None of these presets fit in ESP32 SRAM as-is. See
+> [embedded/ESP32_PORT_GUIDE.md](embedded/ESP32_PORT_GUIDE.md) for what actually
+> fits on-device.
 
 Load any config with:
 
@@ -191,6 +240,8 @@ config = config_to_atomic(load_config("configs/stories_base.yaml"))
 ## Running Tests
 
 ```bash
+pip install pytest
+
 # Run the full test suite
 pytest tests/ -v
 
@@ -198,6 +249,12 @@ pytest tests/ -v
 pytest tests/test_bitlinear.py -v
 pytest tests/test_kernel_parity.py -v
 ```
+
+Two modules need compiled artifacts and skip without them:
+`test_kernel_parity.py` needs `make -C atomic_1bit/core`, and
+`test_cpp_runtime_parity.py` needs the runner
+(`cd embedded && g++ -O3 -std=c++17 atomic_runner.cpp -o runner`). Build both
+before trusting a green run.
 
 ---
 
