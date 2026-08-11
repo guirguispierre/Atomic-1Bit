@@ -4,7 +4,10 @@ model:
   depth: 6
   heads: 4
   context_length: 128
-  vocab_size: 50257
+  # guirguispierre 2026-08-10 - train.py remaps gpt-2 ids into this many slots
+  # by frequency; TinyStories has ~12k distinct tokens and the top 4096 cover
+  # 98.8% of occurrences, so 50257 left three quarters of the rows untrained
+  vocab_size: 4096
 
 quantization:
   weight_bits: 1.58
