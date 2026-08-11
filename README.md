@@ -59,6 +59,33 @@ O(n^2) in the number of tokens. The Python path (`AtomicTransformer.generate`)
 
 </details>
 
+### Quality baseline
+
+Size and speed numbers only matter if the model says something. Training the
+Quick Start config on TinyStories for 15k steps (about 25 minutes on an M-series
+laptop) gives:
+
+| Metric | Value |
+|:---|---:|
+| Held-out perplexity | **101.3** |
+| Uniform baseline (learned nothing) | 4096 |
+| Distinct trigram ratio | 0.98 |
+| 5-gram repetition rate | 0.00 |
+
+Sampled from the C++ engine at `temp 0.8`, reading a 5.6 MB packed binary:
+
+```
+One day, "Let, He would the king. "What, Ben?" "" ?" Ben said said, I said,
+"Let'm promise go to go and Tom. "Mom said, we look one more. It, "No the way.
+```
+
+That is the honest state of it: the register, names and phrasing of TinyStories
+with local grammar, but it does not hold a sentence together, let alone a story.
+15k steps on 6.85M parameters buys a working pipeline and a number to improve
+against, not a good storyteller. Reproduce with `python3
+atomic_1bit/training/train.py`; checkpoints land in `weights/`, which is
+gitignored.
+
 ---
 
 ## Quick Start
