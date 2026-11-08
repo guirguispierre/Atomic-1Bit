@@ -8,10 +8,12 @@ BACKEND ?= CPU
 ifeq ($(BACKEND), CPU)
 	SRCS = backends/cpu_kernel.cpp
 	# CXXFLAGS += -fopenmp  # specific to GCC/libomp
-	# 2026-11-07 - the kernel has an AVX2 path guarded by __AVX2__ that was
-	# never enabled; turn it on for x86_64 hosts (ARM keeps the NEON path).
+	# 2026-11-07 - the kernel has an AVX2 path guarded by __AVX2__; enable it
+	# only when the build host actually exposes AVX2 (ARM keeps the NEON path).
 	ifeq ($(shell uname -m),x86_64)
-		CXXFLAGS += -mavx2
+		ifeq ($(shell grep -qw avx2 /proc/cpuinfo 2>/dev/null && echo yes),yes)
+			CXXFLAGS += -mavx2
+		endif
 	endif
 endif
 
