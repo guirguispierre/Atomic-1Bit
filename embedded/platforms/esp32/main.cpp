@@ -180,12 +180,12 @@ void setup() {
         return;
     }
 
-    if (version != 2) {
-        Serial.printf("ERROR: model is v%d, this build needs v2\n", version);
+    if (version != 2 && version != 3) {
+        Serial.printf("ERROR: model is v%d, this build needs v2 or v3\n", (int)version);
         return;
     }
 
-    Serial.printf("Model format: ATOM v%d\n", version);
+    Serial.printf("Model format: ATOM v%d\n", (int)version);
 
     // Skip config (6 ints = 24 bytes) - we use hardcoded constants
     model_file.seek(model_file.position() + 24);
@@ -210,8 +210,23 @@ void setup() {
         return;
     }
 
-    model_file.read((uint8_t *)token_emb, emb_size);
-    model_file.read((uint8_t *)pos_emb, pos_size);
+    // v2 stores fp32 embeddings; v3 stores one fp32 scale per row plus int8.
+    static float v3_scales[VOCAB_SIZE];
+    static int8_t v3_q_row[DIM];
+    auto read_emb = [&](float *dst, int rows) {
+        if (version == 2) {
+            model_file.read((uint8_t *)dst, (size_t)rows * DIM * sizeof(float));
+            return;
+        }
+        model_file.read((uint8_t *)v3_scales, (size_t)rows * sizeof(float));
+        for (int r = 0; r < rows; r++) {
+            model_file.read((uint8_t *)v3_q_row, DIM);
+            for (int d = 0; d < DIM; d++)
+                dst[(size_t)r * DIM + d] = (float)v3_q_row[d] * v3_scales[r];
+        }
+    };
+    read_emb(token_emb, VOCAB_SIZE);
+    read_emb(pos_emb, CONTEXT_LEN);
 
     weight_data_offset = model_file.position();
     Serial.printf("Embeddings loaded. Weight data starts at offset %d\n",

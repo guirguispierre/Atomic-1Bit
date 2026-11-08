@@ -1,6 +1,7 @@
 import pytest
 from unittest.mock import patch, MagicMock, PropertyMock
 import torch
+from types import SimpleNamespace
 
 from atomic_1bit.utils.thermal import ThermalMonitor
 
@@ -34,15 +35,16 @@ class TestThermalMonitorInit:
     def test_disabled_when_no_sensor_api(self):
         """Should disable gracefully when sensors_temperatures doesn't exist."""
         # ThermalMonitor checks hasattr(psutil, "sensors_temperatures")
-        # On macOS this is already False, so just construct directly
-        monitor = ThermalMonitor()
+        with patch("atomic_1bit.utils.thermal.psutil", SimpleNamespace()):
+            monitor = ThermalMonitor()
         assert not monitor.enabled
 
 
 class TestThermalMonitorCheck:
     def test_skip_when_disabled(self):
         """check_and_pause should be a no-op when disabled."""
-        monitor = ThermalMonitor()
+        with patch(PATCH_TARGET, create=True, return_value={}):
+            monitor = ThermalMonitor()
         assert not monitor.enabled
         # Should not raise or block
         monitor.check_and_pause(step=0)

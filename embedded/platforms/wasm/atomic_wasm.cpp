@@ -193,8 +193,8 @@ int init_model(const uint8_t *data, int data_len) {
 
     if (magic != 0x41544F4D)
         return -1; // Bad magic
-    if (version != 2)
-        return -1; // Format predates 2-bit weight packing
+    if (version != 2 && version != 3)
+        return -1; // Unsupported format version
 
     // Read config (6 ints = 24 bytes)
     int32_t config[6];
@@ -216,17 +216,25 @@ int init_model(const uint8_t *data, int data_len) {
         offset += DIM * sizeof(float);
     }
 
-    // Token embeddings
-    int emb_size = VOCAB_SIZE * DIM;
-    token_emb = (float *)malloc(emb_size * sizeof(float));
-    memcpy(token_emb, data + offset, emb_size * sizeof(float));
-    offset += emb_size * sizeof(float);
-
-    // Positional embeddings
-    int pos_size = CONTEXT_LEN * DIM;
-    pos_emb = (float *)malloc(pos_size * sizeof(float));
-    memcpy(pos_emb, data + offset, pos_size * sizeof(float));
-    offset += pos_size * sizeof(float);
+    // v2 stores fp32 embeddings; v3 stores one fp32 scale per row plus int8.
+    auto read_emb = [&](float **dst, int rows, int cols) {
+        *dst = (float *)malloc((size_t)rows * cols * sizeof(float));
+        if (version == 2) {
+            memcpy(*dst, data + offset, (size_t)rows * cols * sizeof(float));
+            offset += rows * cols * sizeof(float);
+            return;
+        }
+        float *scales = (float *)malloc(rows * sizeof(float));
+        memcpy(scales, data + offset, rows * sizeof(float));
+        offset += rows * sizeof(float);
+        const int8_t *q = (const int8_t *)(data + offset);
+        offset += (size_t)rows * cols;
+        for (int i = 0; i < rows * cols; i++)
+            (*dst)[i] = (float)q[i] * scales[i / cols];
+        free(scales);
+    };
+    read_emb(&token_emb, VOCAB_SIZE, DIM);
+    read_emb(&pos_emb, CONTEXT_LEN, DIM);
 
     // Helper lambdas
     auto read_f32 = [&](TensorF32 *t, int size) {
