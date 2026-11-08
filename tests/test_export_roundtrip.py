@@ -3,8 +3,8 @@
 The C++ loader (embedded/atomic_lib.h, embedded/atomic_runner.cpp) reads:
   header   : 8 x int32  (magic, version, vocab, dim, depth, heads, ctx, has_gist)
   if has_gist: dim x float32
-  token_emb: vocab*dim x float32
-  pos_emb  : ctx*dim x float32
+  token_emb: v2 vocab*dim x float32; v3 vocab x float32 scales + vocab*dim x int8
+  pos_emb  : v2 ctx*dim x float32;   v3 ctx x float32 scales + ctx*dim x int8
   per layer:
     ln1:        dim x float32
     q/k/v/o:    each prefixed by float32 scale, then ceil(dim*dim / 4) bytes
@@ -15,6 +15,8 @@ The C++ loader (embedded/atomic_lib.h, embedded/atomic_runner.cpp) reads:
   head:       float32 scale + ceil(dim * vocab / 4) bytes
 
 Ternary weights are packed four per byte as w + 1 (format version 2).
+Format version 3 (2026-11-07) stores the embeddings as int8 with one
+float32 scale per row instead of raw float32.
 
 This test parses an exported binary using exactly that layout and asserts
 that every field arrives where the C++ loader expects it. If the exporter
@@ -68,8 +70,19 @@ def parse_binary(path):
         if has_gist:
             out["gist"] = _read_floats(f, dim)
 
-        out["token_emb"] = _read_floats(f, vocab * dim)
-        out["pos_emb"] = _read_floats(f, ctx * dim)
+        if version == 2:
+            out["token_emb"] = _read_floats(f, vocab * dim)
+            out["pos_emb"] = _read_floats(f, ctx * dim)
+        else:
+            def _read_emb(rows, cols):
+                scales = np.array(_read_floats(f, rows), dtype=np.float32)
+                raw = f.read(rows * cols)
+                assert len(raw) == rows * cols, "embedding data truncated"
+                q = np.frombuffer(raw, dtype=np.int8).reshape(rows, cols)
+                return tuple((q * scales[:, None]).reshape(-1).tolist())
+
+            out["token_emb"] = _read_emb(vocab, dim)
+            out["pos_emb"] = _read_emb(ctx, dim)
 
         layers = []
         for i in range(depth):
@@ -146,7 +159,7 @@ def test_layout_matches_loader(tmp_bin):
     parsed = parse_binary(tmp_bin)
 
     assert parsed["magic"] == 0x41544F4D
-    assert parsed["version"] == 2
+    assert parsed["version"] == 3
     assert parsed["vocab"] == cfg.vocab_size
     assert parsed["dim"] == cfg.dim
     assert parsed["depth"] == cfg.depth
@@ -191,8 +204,8 @@ def test_byte_count_matches_expected(tmp_bin):
 
     # Header
     expected = 32
-    # token_emb + pos_emb (float32)
-    expected += (v * d + ctx * d) * 4
+    # token_emb + pos_emb (v3: int8 data + one float32 scale per row)
+    expected += (v * d + v * 4) + (ctx * d + ctx * 4)
     # Per layer
     per_layer = (
         d * 4                                      # ln1

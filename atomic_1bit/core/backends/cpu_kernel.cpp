@@ -83,42 +83,32 @@ void ternary_matmul(const int8_t *A, const int8_t *B_transposed, int32_t *C,
       __m256i v_acc1 = _mm256_setzero_si256();
       __m256i ones = _mm256_set1_epi16(1);
 
-      for (; k <= K - 64; k += 64) {
-        // First 32 elements
-        __m256i va0 = _mm256_loadu_si256((__m256i *)(val_a + k));
-        __m256i vb0 = _mm256_loadu_si256((__m256i *)(val_b + k));
-        __m256i vprod0 = _mm256_sign_epi8(va0, vb0);
-        __m256i v_lo0 = _mm256_cvtepi8_epi16(_mm256_castsi256_si128(vprod0));
-        __m256i v_hi0 = _mm256_cvtepi8_epi16(_mm256_extracti128_si256(vprod0, 1));
-        v_lo0 = _mm256_madd_epi16(v_lo0, ones);
-        v_hi0 = _mm256_madd_epi16(v_hi0, ones);
-        v_acc0 = _mm256_add_epi32(v_acc0, v_lo0);
-        v_acc0 = _mm256_add_epi32(v_acc0, v_hi0);
+      // 2026-11-07 - widening multiply (like the NEON path) instead of
+      // _mm256_sign_epi8: sign_epi8 computes a * sign(b) in int8, so an
+      // activation of -128 against weight -1 wraps back to -128 and flips
+      // the sum. Products in int16 cannot overflow (|a*b| <= 16384) and
+      // madd_epi16 widens pairs into int32.
+      auto block32 = [&](const int8_t *a, const int8_t *b, __m256i &acc) {
+        __m256i va = _mm256_loadu_si256((__m256i *)a);
+        __m256i vb = _mm256_loadu_si256((__m256i *)b);
+        __m256i pa = _mm256_mullo_epi16(
+            _mm256_cvtepi8_epi16(_mm256_castsi256_si128(va)),
+            _mm256_cvtepi8_epi16(_mm256_castsi256_si128(vb)));
+        __m256i pb = _mm256_mullo_epi16(
+            _mm256_cvtepi8_epi16(_mm256_extracti128_si256(va, 1)),
+            _mm256_cvtepi8_epi16(_mm256_extracti128_si256(vb, 1)));
+        acc = _mm256_add_epi32(acc, _mm256_madd_epi16(pa, ones));
+        acc = _mm256_add_epi32(acc, _mm256_madd_epi16(pb, ones));
+      };
 
-        // Second 32 elements
-        __m256i va1 = _mm256_loadu_si256((__m256i *)(val_a + k + 32));
-        __m256i vb1 = _mm256_loadu_si256((__m256i *)(val_b + k + 32));
-        __m256i vprod1 = _mm256_sign_epi8(va1, vb1);
-        __m256i v_lo1 = _mm256_cvtepi8_epi16(_mm256_castsi256_si128(vprod1));
-        __m256i v_hi1 = _mm256_cvtepi8_epi16(_mm256_extracti128_si256(vprod1, 1));
-        v_lo1 = _mm256_madd_epi16(v_lo1, ones);
-        v_hi1 = _mm256_madd_epi16(v_hi1, ones);
-        v_acc1 = _mm256_add_epi32(v_acc1, v_lo1);
-        v_acc1 = _mm256_add_epi32(v_acc1, v_hi1);
+      for (; k <= K - 64; k += 64) {
+        block32(val_a + k, val_b + k, v_acc0);
+        block32(val_a + k + 32, val_b + k + 32, v_acc1);
       }
 
       // Remaining 32-element block
-      for (; k <= K - 32; k += 32) {
-        __m256i va = _mm256_loadu_si256((__m256i *)(val_a + k));
-        __m256i vb = _mm256_loadu_si256((__m256i *)(val_b + k));
-        __m256i vprod = _mm256_sign_epi8(va, vb);
-        __m256i v_lo = _mm256_cvtepi8_epi16(_mm256_castsi256_si128(vprod));
-        __m256i v_hi = _mm256_cvtepi8_epi16(_mm256_extracti128_si256(vprod, 1));
-        v_lo = _mm256_madd_epi16(v_lo, ones);
-        v_hi = _mm256_madd_epi16(v_hi, ones);
-        v_acc0 = _mm256_add_epi32(v_acc0, v_lo);
-        v_acc0 = _mm256_add_epi32(v_acc0, v_hi);
-      }
+      for (; k <= K - 32; k += 32)
+        block32(val_a + k, val_b + k, v_acc0);
 
       // Combine accumulators
       v_acc0 = _mm256_add_epi32(v_acc0, v_acc1);

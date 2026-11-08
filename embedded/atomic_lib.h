@@ -5,6 +5,9 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#if defined(__AVX2__)
+#include <immintrin.h>
+#endif
 #include <fstream>
 #include <iostream>
 #include <string>
@@ -117,7 +120,22 @@ inline void bit_linear(const vector<float> &x, const vector<int8_t> &w,
     if (xv == 0)
       continue; // free sparsity: skip the whole row
     const int8_t *wrow = &w[(size_t)i * out_dim];
-    for (int o = 0; o < out_dim; ++o)
+    // 2026-11-07 - AVX2 path where available (bit-identical integer math);
+    // embedded targets keep the scalar loop.
+    int o = 0;
+#if defined(__AVX2__)
+    {
+      __m256i vxv = _mm256_set1_epi32(xv);
+      for (; o + 8 <= out_dim; o += 8) {
+        __m256i wv = _mm256_cvtepi8_epi32(
+            _mm_loadl_epi64((const __m128i *)(wrow + o)));
+        __m256i av = _mm256_loadu_si256((const __m256i *)(acc.data() + o));
+        av = _mm256_add_epi32(av, _mm256_mullo_epi32(wv, vxv));
+        _mm256_storeu_si256((__m256i *)(acc.data() + o), av);
+      }
+    }
+#endif
+    for (; o < out_dim; ++o)
       acc[o] += wrow[o] * xv;
   }
 
@@ -180,9 +198,9 @@ inline bool load_model(const string &filename, AtomicModel &model) {
          << " (expected 0x" << ATOMIC_MAGIC << ")" << dec << endl;
     return false;
   }
-  if (version != ATOMIC_VERSION) {
+  if (version != ATOMIC_VERSION && version != 3u) {
     cerr << "load_model: unsupported version " << version
-         << " (expected " << ATOMIC_VERSION << ")" << endl;
+         << " (expected " << ATOMIC_VERSION << " or 3)" << endl;
     return false;
   }
 
@@ -201,12 +219,22 @@ inline bool load_model(const string &filename, AtomicModel &model) {
     f.read((char *)model.gist_vector.data(), dim * sizeof(float));
   }
 
-  model.token_emb.resize((size_t)model.config.vocab_size * dim);
-  f.read((char *)model.token_emb.data(),
-         model.token_emb.size() * sizeof(float));
-
-  model.pos_emb.resize((size_t)model.config.max_seq_len * dim);
-  f.read((char *)model.pos_emb.data(), model.pos_emb.size() * sizeof(float));
+  // Embeddings: v2 raw fp32; v3 int8 with one fp32 scale per row.
+  auto read_emb = [&](vector<float> &dst, int rows) {
+    dst.resize((size_t)rows * dim);
+    if (version == ATOMIC_VERSION) {
+      f.read((char *)dst.data(), dst.size() * sizeof(float));
+    } else {
+      vector<float> scales(rows);
+      f.read((char *)scales.data(), (size_t)rows * sizeof(float));
+      vector<int8_t> q(dst.size());
+      f.read((char *)q.data(), q.size());
+      for (size_t i = 0; i < q.size(); ++i)
+        dst[i] = (float)q[i] * scales[i / (size_t)dim];
+    }
+  };
+  read_emb(model.token_emb, model.config.vocab_size);
+  read_emb(model.pos_emb, model.config.max_seq_len);
 
   for (int i = 0; i < model.config.depth; ++i) {
     AtomicLayer layer;

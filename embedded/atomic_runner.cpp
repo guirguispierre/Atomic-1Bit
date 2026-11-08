@@ -3,6 +3,9 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#if defined(__AVX2__)
+#include <immintrin.h>
+#endif
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -137,7 +140,23 @@ void bit_linear(const vector<float> &x, const TensorI8 &w, vector<float> &out,
     const int8_t *wrow = &w.data[(size_t)i * out_dim];
     // guirguispierre 2026-08-10 - w is {-1,0,1} so the multiply is the add/sub
     // and vectorizes; the branchy form stalls on mispredicts
-    for (int j = 0; j < out_dim; ++j)
+    // 2026-11-07 - AVX2 path: 8 int32 lanes of the same integer math, so the
+    // totals are bit-identical to the scalar loop; scalar tail and non-AVX2
+    // builds keep the original loop.
+    int j = 0;
+#if defined(__AVX2__)
+    {
+      __m256i vxv = _mm256_set1_epi32(xv);
+      for (; j + 8 <= out_dim; j += 8) {
+        __m256i wv = _mm256_cvtepi8_epi32(
+            _mm_loadl_epi64((const __m128i *)(wrow + j)));
+        __m256i av = _mm256_loadu_si256((const __m256i *)(acc + j));
+        av = _mm256_add_epi32(av, _mm256_mullo_epi32(wv, vxv));
+        _mm256_storeu_si256((__m256i *)(acc + j), av);
+      }
+    }
+#endif
+    for (; j < out_dim; ++j)
       acc[j] += wrow[j] * xv;
   }
 
@@ -196,9 +215,9 @@ bool load_model(const char *filename, AtomicModel &model) {
   }
 
   f.read((char *)&version, sizeof(int32_t));
-  if (version != 2) {
+  if (version != 2 && version != 3) {
     cerr << "Unsupported version: " << version
-         << " (expected 2; re-export with atomic_1bit/utils/export_to_cpp.py)"
+         << " (expected 2 or 3; re-export with atomic_1bit/utils/export_to_cpp.py)"
          << endl;
     return false;
   }
@@ -249,9 +268,28 @@ bool load_model(const char *filename, AtomicModel &model) {
          << " Pos: " << f.tellg() << endl;
   };
 
-  // Embeddings
-  read_f32(model.token_emb, c.vocab_size, c.dim);
-  read_f32(model.pos_emb, c.max_seq_len, c.dim);
+  // Embeddings: v2 is raw fp32; v3 is int8 with one fp32 scale per row,
+  // dequantized at load into the same fp32 arrays.
+  auto read_emb = [&](TensorF32 &t, int r, int c_dim) {
+    t.rows = r;
+    t.cols = c_dim;
+    t.data.resize((size_t)r * c_dim);
+    if (version == 2) {
+      f.read((char *)t.data.data(), t.data.size() * sizeof(float));
+    } else {
+      vector<float> scales(r);
+      f.read((char *)scales.data(), (size_t)r * sizeof(float));
+      vector<int8_t> q(t.data.size());
+      f.read((char *)q.data(), q.size());
+      for (size_t i = 0; i < q.size(); ++i)
+        t.data[i] = (float)q[i] * scales[i / (size_t)c_dim];
+    }
+    cout << "  Read EMB (" << r << "x" << c_dim << ") Pos: " << f.tellg()
+         << endl;
+  };
+
+  read_emb(model.token_emb, c.vocab_size, c.dim);
+  read_emb(model.pos_emb, c.max_seq_len, c.dim);
 
   // Layers
   model.layers.resize(c.depth);

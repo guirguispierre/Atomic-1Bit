@@ -77,8 +77,9 @@ def export_model(model: AtomicTransformer, filename: str, prompt: str = None, gi
         # 1. Header with Magic Bytes and Version
         # Magic: 'ATOM' = 0x41544F4D
         # guirguispierre 2026-08-10 - v2 packs ternary weights four per byte
+        # 2026-11-07 - v3 stores embeddings int8 with one fp32 scale per row
         magic = 0x41544F4D
-        version = 2
+        version = 3
 
         # vocab_size, dim, depth, heads, max_seq_len, has_gist (6 * 4 = 24 bytes)
         c = model.config
@@ -123,9 +124,18 @@ def export_model(model: AtomicTransformer, filename: str, prompt: str = None, gi
                 f.write(data.tobytes())
             print(f"  Wrote {name}: {data.shape} ({dtype})")
 
-        # 2. Embeddings
-        write_tensor("token_emb", model.token_emb.weight, 'f')
-        write_tensor("pos_emb", model.pos_emb.weight, 'f')
+        # 2. Embeddings (v3: int8, per-row scale)
+        def write_emb(name, tensor):
+            w = tensor.detach().cpu().to(torch.float32)
+            rows = w.shape[0]
+            scales = (w.abs().amax(dim=1) / 127.0).clamp(min=1e-8)
+            q = (w / scales.unsqueeze(1)).round().clamp(-127, 127).to(torch.int8)
+            f.write(scales.numpy().astype('float32').tobytes())
+            f.write(q.numpy().tobytes())
+            print(f"  Wrote {name}: {tuple(w.shape)} (int8 per-row, {rows} scales)")
+
+        write_emb("token_emb", model.token_emb.weight)
+        write_emb("pos_emb", model.pos_emb.weight)
 
         # 3. Layers
         for i, layer in enumerate(model.layers):
