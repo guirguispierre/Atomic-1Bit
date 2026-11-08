@@ -185,6 +185,8 @@ extern "C" {
  */
 int init_model(const uint8_t *data, int data_len) {
     int offset = 0;
+    if (data_len < 32) // magic + version + config
+        return -1;
 
     // Read header
     int32_t magic, version;
@@ -208,6 +210,29 @@ int init_model(const uint8_t *data, int data_len) {
     HAS_GIST = config[5];
     HEAD_DIM = DIM / HEADS;
     HIDDEN_DIM = 4 * DIM;
+
+    // Reject truncated buffers before any read can pass data_len.
+    auto packed_bytes = [](int rows, int cols) -> size_t {
+        size_t n = (size_t)rows * cols;
+        return (n + 3) / 4;
+    };
+    size_t expected = (size_t)offset;
+    if (HAS_GIST)
+        expected += (size_t)DIM * sizeof(float);
+    size_t emb_elems = (size_t)VOCAB_SIZE * DIM + (size_t)CONTEXT_LEN * DIM;
+    if (version == 2) {
+        expected += emb_elems * sizeof(float);
+    } else {
+        expected += ((size_t)VOCAB_SIZE + CONTEXT_LEN) * sizeof(float) + emb_elems;
+    }
+    size_t layer_bytes = 2 * (size_t)DIM * sizeof(float)
+        + 4 * (sizeof(float) + packed_bytes(DIM, DIM))
+        + 2 * (sizeof(float) + packed_bytes(DIM, HIDDEN_DIM));
+    expected += (size_t)DEPTH * layer_bytes;
+    expected += (size_t)DIM * sizeof(float);
+    expected += sizeof(float) + packed_bytes(DIM, VOCAB_SIZE);
+    if ((size_t)data_len < expected)
+        return -1;
 
     // Gist vector
     if (HAS_GIST) {
