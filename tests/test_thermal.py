@@ -1,3 +1,4 @@
+import psutil
 import pytest
 from unittest.mock import patch, MagicMock, PropertyMock
 import torch
@@ -31,10 +32,13 @@ class TestThermalMonitorInit:
             monitor = ThermalMonitor()
         assert not monitor.enabled
 
-    def test_disabled_when_no_sensor_api(self):
+    def test_disabled_when_no_sensor_api(self, monkeypatch):
         """Should disable gracefully when sensors_temperatures doesn't exist."""
-        # ThermalMonitor checks hasattr(psutil, "sensors_temperatures")
-        # On macOS this is already False, so just construct directly
+        # ThermalMonitor checks hasattr(psutil, "sensors_temperatures").
+        # macOS lacks it; Linux CI runners may have it -- deleting the
+        # attr simulates the missing-API path on either host.
+        if hasattr(psutil, "sensors_temperatures"):
+            monkeypatch.delattr(psutil, "sensors_temperatures")
         monitor = ThermalMonitor()
         assert not monitor.enabled
 
@@ -43,8 +47,7 @@ class TestThermalMonitorCheck:
     def test_skip_when_disabled(self):
         """check_and_pause should be a no-op when disabled."""
         monitor = ThermalMonitor()
-        assert not monitor.enabled
-        # Should not raise or block
+        monitor.enabled = False  # host-independent: exercise the disabled path
         monitor.check_and_pause(step=0)
 
     def test_skip_non_interval_steps(self):
