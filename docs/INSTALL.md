@@ -31,10 +31,25 @@ This installs:
 - `tqdm` -- Progress bars
 - `pyyaml` -- Config file parsing
 
-### 3. Verify installation
+Alternatively, `pip install .` installs the `atomic_1bit` package (same
+requirements) and also compiles the C++ kernel in step 3 below.
+
+### 3. Verify installation (clone to proof)
+
+```bash
+make verify
+```
+
+This single target builds the ternary kernel and the C++ runner, checks the
+kernel against the NumPy reference, smoke-tests the runner binary, and runs
+the quickstart demo. If everything is in place it ends with
+`verify complete: kernel, runner, and quickstart all ran`.
+
+Without make, the lighter check is:
 
 ```bash
 python3 -c "import torch; import tiktoken; print('Dependencies OK')"
+python3 examples/quickstart.py    # auto-builds the kernel on first run
 ```
 
 ## C++ Components
@@ -43,9 +58,11 @@ There are two separate C++ artifacts, and the first one is **not** optional.
 
 ### 1. Ternary kernel (`libatomic.so`) -- required for Python inference
 
-`atomic_1bit/python/wrapper.py` loads this shared library, so
-`python3 atomic_1bit/python/inference.py` and the kernel parity tests fail
-without it:
+`atomic_1bit/python/wrapper.py` loads this shared library. It is built
+automatically -- by `pip install .`, by `make verify`, or by the wrapper
+itself the first time it is imported -- so on a machine with a toolchain you
+never build it by hand. To build it explicitly (or to pick a non-CPU
+backend):
 
 ```bash
 cd atomic_1bit/core
@@ -64,6 +81,9 @@ test -f atomic_1bit/core/libatomic.so && echo "kernel built"
 cd embedded
 g++ -O3 -std=c++17 atomic_runner.cpp -o runner
 ```
+
+(`make runner` from the repo root does the same thing. The benchmark suite
+also builds the runner itself if it is missing.)
 
 ### Build with Metal backend (macOS only)
 

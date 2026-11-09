@@ -5,6 +5,62 @@ All notable changes to Atomic-1Bit are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-11-08
+
+### Changed
+- **Binary format v3: embeddings quantized to int8 with per-row scales.** Each
+  embedding row is stored as int8 codes plus one `float32` absmax scale
+  (`scale = max(|row|) / 127`), replacing the raw float32 tables that were
+  72-78% of a v2 export. The Quick Start 6.85M model drops 5.8 MB -> 2.6 MB,
+  `pocket_4k` 5.4 MB -> 2.2 MB, and `flagship_12m` 8.4 MB -> 4.2 MB -- all
+  three presets now fit 8 MB ESP32 flash. Ternary packing was rejected for
+  embeddings: they are not QAT-trained, and {-1,0,1} rounding would zero most
+  of the table.
+- All four loaders (`atomic_runner.cpp`, `atomic_lib.h`, `platforms/esp32`,
+  `platforms/wasm`) accept both v2 and v3 and dequantize embeddings to float32
+  at load, so inference math and RAM usage are unchanged.
+- `export_model` takes a `format_version` parameter (default 3); pass 2 for
+  the legacy layout.
+
+### Added
+- **KV cache in the C++ runner.** Decode now appends one K/V row per layer
+  per step instead of recomputing the prefix: ~3.1-3.5k TPS at 100 generated
+  tokens on the Quick Start config where the O(n^2) path managed ~83 TPS
+  (measured on Apple Silicon; output is bit-identical for a fixed seed).
+- **ARM dot-product (sdot) path in the CPU kernel** plus a NEON-safe fallback
+  and branch-free scalar tail -- ~83 GMAC/s on Apple Silicon. Kernel parity
+  remains bit-exact.
+- **A fresh clone now runs end to end**: `wrapper.py` builds `libatomic.so`
+  via make on first import when it is missing, `setup.py` exists for
+  `pip install .`, a root `Makefile` offers `make verify`, and
+  `benchmarks/run_suite.py` builds the runner and exports a model itself.
+- **Real parity check**: `tools/parity_check.py` now diffs the runner's
+  dumped activations against PyTorch numerically and exits nonzero on
+  failure, and `checkpoints/tiny_stories.pt` (a 2000-step TinyStories
+  fixture, 2.65 MB) ships so parity and evals run out of the box.
+- `tests/test_trained_parity.py`, `benchmarks/kernel_micro.py`, and a
+  kernel parity test for odd tail dimensions.
+- `tools/train_fixture_checkpoint.py` -- the script that produced the
+  checked-in checkpoint, with an offline fallback corpus.
+
+### Fixed
+- **Metal backend**: `default.metallib` was located via compile-time
+  `__FILE__` (a relative path under the Makefile), so any process outside
+  `atomic_1bit/core/` hit `exit(1)` and died. The library now resolves next
+  to the dylib via `dladdr`, warns and uses a scalar CPU fallback instead of
+  exiting, and copies into real Metal buffers when host memory is not
+  page-aligned for zero-copy wraps. 168 tests pass under `BACKEND=METAL`.
+- **AVX2 bit-exactness**: `_mm256_sign_epi8` wrapped activation -128 x
+  weight -1 back to -128 instead of +128 (off by 256). Replaced with a
+  widen-to-int16 multiply path, verified on x86_64 under emulation.
+- `make -C atomic_1bit/core clean` removes the generated metallib from the
+  directory it is actually written to.
+- **CardputerChat sketch** rewritten for format v2/v3 -- it previously read
+  a layout that predated the packed format entirely (no header, no scales,
+  unpacked weights) and could not load any export the tool produces.
+- ESP32 PlatformIO project: source moved to `src/main.cpp` so `pio run`
+  builds it; verified compiling for `esp32dev` (22.5 KB RAM, 318 KB flash).
+
 ## [1.5.0] - 2026-08-10
 
 ### Changed

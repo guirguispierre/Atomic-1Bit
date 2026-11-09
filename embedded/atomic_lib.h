@@ -13,9 +13,12 @@
 using namespace std;
 
 // Binary format magic ("ATOM" packed as little-endian int32) and version.
-// Must match atomic_1bit/utils/export_to_cpp.py.
+// Must match atomic_1bit/utils/export_to_cpp.py. v2 stores embeddings as raw
+// float32; v3 stores them as int8 codes with a per-row float32 absmax scale.
+// Both are accepted; embeddings land in memory as float32 either way.
 static constexpr uint32_t ATOMIC_MAGIC = 0x41544F4Du;
-static constexpr uint32_t ATOMIC_VERSION = 2u;
+static constexpr uint32_t ATOMIC_MIN_VERSION = 2u;
+static constexpr uint32_t ATOMIC_VERSION = 3u;
 
 struct Config {
   int vocab_size;
@@ -180,9 +183,9 @@ inline bool load_model(const string &filename, AtomicModel &model) {
          << " (expected 0x" << ATOMIC_MAGIC << ")" << dec << endl;
     return false;
   }
-  if (version != ATOMIC_VERSION) {
-    cerr << "load_model: unsupported version " << version
-         << " (expected " << ATOMIC_VERSION << ")" << endl;
+  if (version < ATOMIC_MIN_VERSION || version > ATOMIC_VERSION) {
+    cerr << "load_model: unsupported version " << version << " (expected "
+         << ATOMIC_MIN_VERSION << "-" << ATOMIC_VERSION << ")" << endl;
     return false;
   }
 
@@ -201,12 +204,25 @@ inline bool load_model(const string &filename, AtomicModel &model) {
     f.read((char *)model.gist_vector.data(), dim * sizeof(float));
   }
 
-  model.token_emb.resize((size_t)model.config.vocab_size * dim);
-  f.read((char *)model.token_emb.data(),
-         model.token_emb.size() * sizeof(float));
+  // guirguispierre 2026-11-08 - v3 stores each embedding row as int8 codes
+  // plus one float32 absmax scale per row (all scales first, then all codes);
+  // dequantize at load so the forward pass still sees a plain fp32 table
+  auto read_embedding = [&](vector<float> &out, int rows) {
+    out.resize((size_t)rows * dim);
+    if (version >= 3) {
+      vector<float> scales(rows);
+      f.read((char *)scales.data(), rows * sizeof(float));
+      vector<int8_t> q(out.size());
+      f.read((char *)q.data(), q.size());
+      for (size_t i = 0; i < out.size(); ++i)
+        out[i] = (float)q[i] * scales[i / dim];
+    } else {
+      f.read((char *)out.data(), out.size() * sizeof(float));
+    }
+  };
 
-  model.pos_emb.resize((size_t)model.config.max_seq_len * dim);
-  f.read((char *)model.pos_emb.data(), model.pos_emb.size() * sizeof(float));
+  read_embedding(model.token_emb, model.config.vocab_size);
+  read_embedding(model.pos_emb, model.config.max_seq_len);
 
   for (int i = 0; i < model.config.depth; ++i) {
     AtomicLayer layer;

@@ -14,12 +14,15 @@
 **Goal:** Make inference faster on existing hardware without changing model semantics.
 
 ### Planned
-- [ ] **SIMD-optimized ternary matmul** (AVX2 / AVX-512)
+- [x] **SIMD-optimized ternary matmul** (NEON sdot + AVX2, scalar fallback) —
+      ~70 GMAC/s on Apple Silicon, ~240–280× the original branch-based scalar
+      loop (~1.2× vs a multiply loop auto-vectorized by clang); see
+      `benchmarks/kernel_micro.py`
 - [ ] **Cache-friendly weight layouts**
 - [ ] **Reduced heap allocations** in hot paths
 - [ ] **Optional KV-cache compression** (INT8 / INT16)
 
-**Target:** 2–4× CPU speedup over v1.0 scalar kernel
+**Target:** 2–4× CPU speedup over v1.0 scalar kernel (exceeded — see above)
 
 ---
 

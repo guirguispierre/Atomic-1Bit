@@ -1,115 +1,147 @@
 #include "../kernel.h"
 #include <Metal/Metal.h>
+#include <dlfcn.h>
 #include <iostream>
+#include <string.h>
+
+// Scalar CPU fallback — identical semantics to the CPU backend's tail loop.
+// Used when no Metal device exists, when default.metallib cannot be found,
+// or when a zero-copy buffer wrap fails. Never exits the host process.
+static void ternary_matmul_cpu(const int8_t *A, const int8_t *B_transposed,
+                               int32_t *C, int M, int N, int K) {
+  for (int i = 0; i < M; ++i) {
+    for (int j = 0; j < N; ++j) {
+      const int8_t *val_a = &A[i * K];
+      const int8_t *val_b = &B_transposed[j * K];
+      int32_t total = 0;
+      for (int k = 0; k < K; ++k) {
+        int8_t bv = val_b[k];
+        if (bv == 1)
+          total += val_a[k];
+        else if (bv == -1)
+          total -= val_a[k];
+      }
+      C[i * N + j] = total;
+    }
+  }
+}
 
 // Singleton for Metal Context
 struct MetalContext {
-  id<MTLDevice> device;
-  id<MTLCommandQueue> commandQueue;
-  id<MTLComputePipelineState> pipelineState;
+  id<MTLDevice> device = nil;
+  id<MTLCommandQueue> commandQueue = nil;
+  id<MTLComputePipelineState> pipelineState = nil;
+  bool ok = false;
 
   MetalContext() {
     device = MTLCreateSystemDefaultDevice();
     if (!device) {
-      std::cerr << "Error: No Metal device found." << std::endl;
-      exit(1);
+      std::cerr << "Metal backend: no Metal device found, using CPU fallback."
+                << std::endl;
+      return;
     }
     commandQueue = [device newCommandQueue];
 
     // Load default library
     NSError *error = nil;
 
-    // The metallib is expected to be next to the dylib.
-    // But for simplicity in this build, we might load from default library if
-    // embedded or from file. Since we compile to 'default.metallib', we load
-    // it.
-
-    // We need to find the path to default.metallib relative to where we are
-    // running, OR we can assume it's in the current directory or adjacent. For
-    // robustness, let's try to load from the main bundle or current directory.
-
-    // Resolve metallib path relative to this source file's directory.
-    // __FILE__ expands to the full path of this .mm file at compile time:
-    //   .../atomic_1bit/core/backends/metal_kernel.mm
-    // Deleting the last path component ("backends") gives us the "core/"
-    // directory, which is where default.metallib is placed by the Makefile.
-    NSString *sourceDir =
-        [[[NSString stringWithUTF8String:__FILE__]
-            stringByDeletingLastPathComponent]   // strip "metal_kernel.mm"
-            stringByDeletingLastPathComponent];  // strip "backends/"
-    NSString *libPath =
-        [sourceDir stringByAppendingPathComponent:@"default.metallib"];
-    NSURL *libOnDisk = [NSURL fileURLWithPath:libPath];
-
-    id<MTLLibrary> defaultLibrary = [device newLibraryWithURL:libOnDisk
-                                                        error:&error];
+    // default.metallib sits next to this dylib. Resolve the dylib's own path
+    // at runtime with dladdr() — robust regardless of the compile-time cwd
+    // (__FILE__ is only a relative path when built via the Makefile).
+    id<MTLLibrary> defaultLibrary = nil;
+    Dl_info info;
+    if (dladdr((const void *)this, &info) && info.dli_fname) {
+      NSString *dylibDir = [[NSString
+          stringWithUTF8String:info.dli_fname] stringByDeletingLastPathComponent];
+      NSURL *libOnDisk = [NSURL
+          fileURLWithPath:[dylibDir
+                              stringByAppendingPathComponent:@"default.metallib"]];
+      defaultLibrary = [device newLibraryWithURL:libOnDisk error:&error];
+    }
     if (!defaultLibrary) {
       // Fallback: try "default.metallib" relative to cwd (e.g. when running
       // from atomic_1bit/core/ directly during development).
-      libOnDisk = [NSURL fileURLWithPath:@"default.metallib"];
-      defaultLibrary = [device newLibraryWithURL:libOnDisk error:&error];
+      defaultLibrary = [device
+          newLibraryWithURL:[NSURL fileURLWithPath:@"default.metallib"]
+                      error:&error];
     }
 
     if (!defaultLibrary) {
-      std::cerr << "Error: Could not load default.metallib: " <<
-          [[error localizedDescription] UTF8String] << std::endl;
-      exit(1);
+      std::cerr << "Metal backend: could not load default.metallib ("
+                << [[error localizedDescription] UTF8String]
+                << "), using CPU fallback." << std::endl;
+      return;
     }
 
     id<MTLFunction> kernelFunction =
         [defaultLibrary newFunctionWithName:@"ternary_matmul_shader"];
     if (!kernelFunction) {
-      std::cerr
-          << "Error: Could not find function 'ternary_matmul_shader' in library"
-          << std::endl;
-      exit(1);
+      std::cerr << "Metal backend: 'ternary_matmul_shader' not in library, "
+                   "using CPU fallback."
+                << std::endl;
+      return;
     }
 
     pipelineState = [device newComputePipelineStateWithFunction:kernelFunction
                                                           error:&error];
     if (!pipelineState) {
-      std::cerr << "Error: Could not create pipeline state: " <<
-          [[error localizedDescription] UTF8String] << std::endl;
-      exit(1);
+      std::cerr << "Metal backend: could not create pipeline state ("
+                << [[error localizedDescription] UTF8String]
+                << "), using CPU fallback." << std::endl;
+      return;
     }
+
+    ok = true;
   }
 };
 
 static MetalContext *g_metal_context = nullptr;
 
 extern "C" {
+// Wrap host memory zero-copy when possible; newBufferWithBytesNoCopy returns
+// nil for unaligned/oversized regions, in which case fall back to a real
+// buffer with a memcpy in (and out for C).
+static id<MTLBuffer> wrapOrCopy(id<MTLDevice> device, const void *ptr,
+                                NSUInteger len, bool *copied) {
+  id<MTLBuffer> buf = [device newBufferWithBytesNoCopy:(void *)ptr
+                                                length:len
+                                               options:MTLResourceStorageModeShared
+                                           deallocator:nil];
+  if (buf) {
+    *copied = false;
+    return buf;
+  }
+  *copied = true;
+  return [device newBufferWithBytes:ptr
+                             length:len
+                            options:MTLResourceStorageModeShared];
+}
+
 void ternary_matmul(const int8_t *A, const int8_t *B_transposed, int32_t *C,
                     int M, int N, int K) {
   if (!g_metal_context) {
     g_metal_context = new MetalContext();
   }
+  if (!g_metal_context->ok) {
+    ternary_matmul_cpu(A, B_transposed, C, M, N, K);
+    return;
+  }
 
-  // Zero-copy buffers: wrap the caller's memory directly using
-  // newBufferWithBytesNoCopy with MTLResourceStorageModeShared.
-  // This is safe on M-series (Apple Silicon) unified memory because the CPU
-  // and GPU share the same physical memory — no explicit DMA transfer occurs
-  // and no staging copy is needed. The nil deallocator means Metal will NOT
-  // free the underlying memory when the buffer is released; the caller (Python
-  // / ctypes) owns and manages the lifetime of A, B_transposed, and C.
-  // Note: on Apple Silicon, MTLResourceStorageModeShared does not require
-  // page alignment for correctness, though aligned allocations are faster.
-  id<MTLBuffer> bufferA = [g_metal_context->device
-      newBufferWithBytesNoCopy:(void *)A
-                        length:(M * K) * sizeof(int8_t)
-                       options:MTLResourceStorageModeShared
-                   deallocator:nil];
-  id<MTLBuffer> bufferB = [g_metal_context->device
-      newBufferWithBytesNoCopy:(void *)B_transposed
-                        length:(N * K) * sizeof(int8_t)
-                       options:MTLResourceStorageModeShared
-                   deallocator:nil];
+  bool cCopied = false, unused = false;
+  id<MTLBuffer> bufferA = wrapOrCopy(g_metal_context->device, A,
+                                     (M * K) * sizeof(int8_t), &unused);
+  id<MTLBuffer> bufferB = wrapOrCopy(g_metal_context->device, B_transposed,
+                                     (N * K) * sizeof(int8_t), &unused);
   // bufferC wraps the output array directly; after GPU execution the results
-  // are already in C — no memcpy needed.
-  id<MTLBuffer> bufferC = [g_metal_context->device
-      newBufferWithBytesNoCopy:(void *)C
-                        length:(M * N) * sizeof(int32_t)
-                       options:MTLResourceStorageModeShared
-                   deallocator:nil];
+  // are already in C — no memcpy needed. If the wrap failed and we got a copy,
+  // results are memcpy'd back below.
+  id<MTLBuffer> bufferC = wrapOrCopy(g_metal_context->device, C,
+                                     (M * N) * sizeof(int32_t), &cCopied);
+
+  if (!bufferA || !bufferB || !bufferC) {
+    ternary_matmul_cpu(A, B_transposed, C, M, N, K);
+    return;
+  }
 
   id<MTLCommandBuffer> commandBuffer =
       [g_metal_context->commandQueue commandBuffer];
@@ -140,7 +172,10 @@ void ternary_matmul(const int8_t *A, const int8_t *B_transposed, int32_t *C,
   [commandBuffer commit];
   [commandBuffer waitUntilCompleted];
 
-  // No memcpy needed: bufferC is a zero-copy wrapper around C, so the GPU
-  // has already written the results directly into the caller's array.
+  // Zero-copy wrap writes results straight into C; a copied buffer needs an
+  // explicit readback.
+  if (cCopied) {
+    memcpy(C, bufferC.contents, (M * N) * sizeof(int32_t));
+  }
 }
 }

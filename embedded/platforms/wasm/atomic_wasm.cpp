@@ -193,8 +193,8 @@ int init_model(const uint8_t *data, int data_len) {
 
     if (magic != 0x41544F4D)
         return -1; // Bad magic
-    if (version != 2)
-        return -1; // Format predates 2-bit weight packing
+    if (version != 2 && version != 3)
+        return -1; // Format predates 2-bit weight packing / unknown layout
 
     // Read config (6 ints = 24 bytes)
     int32_t config[6];
@@ -216,17 +216,33 @@ int init_model(const uint8_t *data, int data_len) {
         offset += DIM * sizeof(float);
     }
 
+    // guirguispierre 2026-11-08 - v3 stores each embedding row as int8 codes
+    // plus one float32 absmax scale per row (all scales first, then all
+    // codes); dequantize at load so the forward pass still sees a plain fp32
+    // table
+    auto read_embedding = [&](float **dst, int rows, int cols) {
+        int n = rows * cols;
+        *dst = (float *)malloc(n * sizeof(float));
+        if (version >= 3) {
+            float *scales = (float *)malloc(rows * sizeof(float));
+            memcpy(scales, data + offset, rows * sizeof(float));
+            offset += rows * sizeof(float);
+            const int8_t *q = (const int8_t *)(data + offset);
+            offset += n;
+            for (int i = 0; i < n; ++i)
+                (*dst)[i] = (float)q[i] * scales[i / cols];
+            free(scales);
+        } else {
+            memcpy(*dst, data + offset, n * sizeof(float));
+            offset += n * sizeof(float);
+        }
+    };
+
     // Token embeddings
-    int emb_size = VOCAB_SIZE * DIM;
-    token_emb = (float *)malloc(emb_size * sizeof(float));
-    memcpy(token_emb, data + offset, emb_size * sizeof(float));
-    offset += emb_size * sizeof(float);
+    read_embedding(&token_emb, VOCAB_SIZE, DIM);
 
     // Positional embeddings
-    int pos_size = CONTEXT_LEN * DIM;
-    pos_emb = (float *)malloc(pos_size * sizeof(float));
-    memcpy(pos_emb, data + offset, pos_size * sizeof(float));
-    offset += pos_size * sizeof(float);
+    read_embedding(&pos_emb, CONTEXT_LEN, DIM);
 
     // Helper lambdas
     auto read_f32 = [&](TensorF32 *t, int size) {

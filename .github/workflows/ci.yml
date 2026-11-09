@@ -99,6 +99,41 @@ jobs:
           .coverage
         retention-days: 30
 
+  metal:
+    name: Metal Backend (macOS)
+    runs-on: macos-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+        cache: 'pip'
+
+    - name: Install Python dependencies
+      run: |
+        pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest
+
+    - name: Ensure Metal toolchain
+      run: |
+        xcrun -sdk macosx metal --version || xcodebuild -downloadComponent MetalToolchain
+
+    - name: Build C++ kernel (Metal backend)
+      run: |
+        cd atomic_1bit/core
+        make clean
+        make BACKEND=METAL
+        cd ../..
+
+    - name: Run kernel parity tests under Metal
+      run: |
+        pytest tests/test_kernel_parity.py -v --tb=short
+
   benchmark:
     name: Performance Benchmark
     runs-on: ubuntu-latest

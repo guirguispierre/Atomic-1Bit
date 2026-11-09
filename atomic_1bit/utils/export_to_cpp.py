@@ -40,8 +40,43 @@ def unpack_ternary(packed, count):
     return (codes.reshape(-1)[:count].astype(np.int8) - 1)
 
 
-def export_model(model: AtomicTransformer, filename: str, prompt: str = None, gist_file: str = None):
-    print(f"Exporting model to {filename} (Gist: {prompt if prompt else 'None'})...")
+# Current binary format version. v2 packs ternary weights four per byte and
+# stores embeddings as raw float32; v3 stores each embedding row as int8 codes
+# with one float32 absmax scale per row. Loaders accept both.
+FORMAT_VERSION = 3
+
+
+def quantize_embedding_int8(w):
+    """Per-row absmax int8 quantization of an embedding table.
+
+    w: (rows, dim) float tensor. Returns (scales, codes) where scales is
+    (rows,) float32, codes is (rows, dim) int8 in [-127, 127], and
+    w[r, d] ~= codes[r, d] * scales[r]. An all-zero row gets scale 1e-8 and
+    all-zero codes, so dequantization still yields an exact zero row.
+    """
+    w = w.detach().to(torch.float32)
+    scales = (w.abs().amax(dim=1) / 127.0).clamp(min=1e-8)
+    codes = (w / scales.unsqueeze(1)).round().clamp(-127, 127).to(torch.int8)
+    return scales.cpu().numpy().astype(np.float32), codes.cpu().numpy()
+
+
+def dequantize_embedding_int8(scales, codes):
+    """Inverse of quantize_embedding_int8, for tests and tooling."""
+    scales = np.asarray(scales, dtype=np.float32).reshape(-1)
+    codes = np.asarray(codes, dtype=np.int8)
+    assert codes.shape[0] == scales.shape[0]
+    return codes.astype(np.float32) * scales[:, None]
+
+
+def export_model(model: AtomicTransformer, filename: str, prompt: str = None, gist_file: str = None,
+                 format_version: int = FORMAT_VERSION):
+    if format_version not in (2, FORMAT_VERSION):
+        raise ValueError(
+            f"format_version must be 2 or {FORMAT_VERSION}, got {format_version}"
+        )
+
+    print(f"Exporting model to {filename} (v{format_version}, "
+          f"Gist: {prompt if prompt else 'None'})...")
 
     # Gist Vector
     has_gist = 0
@@ -77,8 +112,10 @@ def export_model(model: AtomicTransformer, filename: str, prompt: str = None, gi
         # 1. Header with Magic Bytes and Version
         # Magic: 'ATOM' = 0x41544F4D
         # guirguispierre 2026-08-10 - v2 packs ternary weights four per byte
+        # guirguispierre 2026-11-08 - v3 quantizes embeddings to int8 with a
+        # per-row float32 absmax scale
         magic = 0x41544F4D
-        version = 2
+        version = format_version
 
         # vocab_size, dim, depth, heads, max_seq_len, has_gist (6 * 4 = 24 bytes)
         c = model.config
@@ -124,8 +161,22 @@ def export_model(model: AtomicTransformer, filename: str, prompt: str = None, gi
             print(f"  Wrote {name}: {data.shape} ({dtype})")
 
         # 2. Embeddings
-        write_tensor("token_emb", model.token_emb.weight, 'f')
-        write_tensor("pos_emb", model.pos_emb.weight, 'f')
+        # v3: rows x float32 absmax scales, then rows x dim int8 codes.
+        # Loaders dequantize to float32 at load time, so the inference math is
+        # unchanged; the file just stops paying 4 bytes per embedding element.
+        def write_embedding(name, tensor):
+            scales, codes = quantize_embedding_int8(tensor)
+            f.write(scales.tobytes())
+            f.write(codes.tobytes())
+            print(f"  Wrote {name}: {codes.shape} + {scales.size} scales "
+                  f"(int8, {scales.nbytes + codes.nbytes} bytes)")
+
+        if version >= 3:
+            write_embedding("token_emb", model.token_emb.weight)
+            write_embedding("pos_emb", model.pos_emb.weight)
+        else:
+            write_tensor("token_emb", model.token_emb.weight, 'f')
+            write_tensor("pos_emb", model.pos_emb.weight, 'f')
 
         # 3. Layers
         for i, layer in enumerate(model.layers):
@@ -169,6 +220,9 @@ if __name__ == "__main__":
     parser.add_argument("--heads", type=int, default=4, help="Number of heads")
     parser.add_argument("--context_len", type=int, default=64, help="Context length")
     parser.add_argument("--vocab_size", type=int, default=2048, help="Vocab size")
+    parser.add_argument("--format_version", type=int, default=FORMAT_VERSION,
+                        choices=[2, FORMAT_VERSION],
+                        help="Binary format version (3 = int8 embeddings; 2 = fp32 embeddings, legacy)")
 
     args = parser.parse_args()
 
@@ -202,4 +256,5 @@ if __name__ == "__main__":
             print(f"Model file {args.model} not found. using random weights.")
 
     # Export
-    export_model(model, args.output, prompt=args.prompt, gist_file=args.gist_file)
+    export_model(model, args.output, prompt=args.prompt, gist_file=args.gist_file,
+                 format_version=args.format_version)

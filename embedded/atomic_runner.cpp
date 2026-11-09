@@ -196,9 +196,9 @@ bool load_model(const char *filename, AtomicModel &model) {
   }
 
   f.read((char *)&version, sizeof(int32_t));
-  if (version != 2) {
+  if (version != 2 && version != 3) {
     cerr << "Unsupported version: " << version
-         << " (expected 2; re-export with atomic_1bit/utils/export_to_cpp.py)"
+         << " (expected 2 or 3; re-export with atomic_1bit/utils/export_to_cpp.py)"
          << endl;
     return false;
   }
@@ -249,9 +249,33 @@ bool load_model(const char *filename, AtomicModel &model) {
          << " Pos: " << f.tellg() << endl;
   };
 
+  // guirguispierre 2026-11-08 - v3 stores each embedding row as int8 codes
+  // plus one float32 absmax scale per row (all scales first, then all codes);
+  // dequantize at load so the forward pass still sees a plain fp32 table
+  auto read_emb = [&](TensorF32 &t, int r, int c_dim) {
+    t.rows = r;
+    t.cols = c_dim;
+    t.data.resize((size_t)r * c_dim);
+    if (version >= 3) {
+      vector<float> scales(r);
+      f.read((char *)scales.data(), r * sizeof(float));
+      vector<int8_t> q(t.data.size());
+      f.read((char *)q.data(), q.size());
+      for (int i = 0; i < r; ++i) {
+        float s = scales[i];
+        for (int j = 0; j < c_dim; ++j)
+          t.data[(size_t)i * c_dim + j] = (float)q[(size_t)i * c_dim + j] * s;
+      }
+    } else {
+      f.read((char *)t.data.data(), t.data.size() * sizeof(float));
+    }
+    cout << "  Read EMB (" << r << "x" << c_dim << ") v" << version
+         << " Pos: " << f.tellg() << endl;
+  };
+
   // Embeddings
-  read_f32(model.token_emb, c.vocab_size, c.dim);
-  read_f32(model.pos_emb, c.max_seq_len, c.dim);
+  read_emb(model.token_emb, c.vocab_size, c.dim);
+  read_emb(model.pos_emb, c.max_seq_len, c.dim);
 
   // Layers
   model.layers.resize(c.depth);
@@ -312,9 +336,38 @@ struct Workspace {
   }
 };
 
+// --- KV Cache ---
+// Per-layer key/value rows produced by earlier tokens, laid out
+// [layer][pos][dim] so head slices stay contiguous. Positions are absolute:
+// the model uses learned position embeddings added at input time, so a cached
+// row is only valid while its position index is unchanged. The generation
+// loop drops the whole cache (len = -1) whenever the context window slides
+// and rebases positions, then refills it with a full forward pass.
+struct KVCache {
+  vector<float> K, V;
+  int max_seq = 0;
+  int dim = 0;
+  int len = -1; // valid positions (includes the gist slot); -1 = empty/stale
+
+  void init(int depth, int max_seq_len, int dim_) {
+    max_seq = max_seq_len;
+    dim = dim_;
+    K.assign((size_t)depth * max_seq * dim, 0.0f);
+    V.assign((size_t)depth * max_seq * dim, 0.0f);
+    len = -1;
+  }
+  float *k_row(int layer, int pos) {
+    return &K[((size_t)layer * max_seq + pos) * dim];
+  }
+  float *v_row(int layer, int pos) {
+    return &V[((size_t)layer * max_seq + pos) * dim];
+  }
+};
+
 // --- Forward Pass ---
 void forward(AtomicModel &model, const vector<int> &tokens,
-             vector<float> &logits, Workspace &ws, bool parity_mode = false) {
+             vector<float> &logits, Workspace &ws, KVCache &cache,
+             bool parity_mode = false) {
   int dim = model.config.dim;
   int heads = model.config.heads;
   int head_dim = dim / heads;
@@ -385,6 +438,8 @@ void forward(AtomicModel &model, const vector<int> &tokens,
       memcpy(&ws.Q[t * dim], ws.q.data(), dim * sizeof(float));
       memcpy(&ws.K[t * dim], ws.k.data(), dim * sizeof(float));
       memcpy(&ws.V[t * dim], ws.v.data(), dim * sizeof(float));
+      memcpy(cache.k_row(l_idx, t), ws.k.data(), dim * sizeof(float));
+      memcpy(cache.v_row(l_idx, t), ws.v.data(), dim * sizeof(float));
     }
 
     // AttnOut
@@ -474,6 +529,97 @@ void forward(AtomicModel &model, const vector<int> &tokens,
 
   if (parity_mode)
     print_tensor("Final_Logits", logits, (int)logits.size());
+
+  cache.len = seq_len;
+}
+
+// Single-token decode step against the KV cache.
+//
+// Appends one K/V row per layer at `pos` and attends the new query over
+// cache rows 0..pos. Every op is the same call in the same order as the
+// last-token computation inside forward(), so the logits are identical to
+// recomputing the full prefix -- the cache only avoids the wasted work.
+void forward_one(AtomicModel &model, int token_id, int pos,
+                 vector<float> &logits, Workspace &ws, KVCache &cache) {
+  int dim = model.config.dim;
+  int heads = model.config.heads;
+  int head_dim = dim / heads;
+
+  ws.ensure_size(model.config.max_seq_len, dim);
+
+  if (pos >= model.config.max_seq_len)
+    pos = model.config.max_seq_len - 1;
+  if (token_id >= model.config.vocab_size)
+    token_id = 0;
+
+  // Residual stream for this token lives in row `pos` of ws.X, matching the
+  // indexing forward() uses for the same position.
+  float *x = &ws.X[(size_t)pos * dim];
+  float *tok_ptr = &model.token_emb.data[(size_t)token_id * dim];
+  float *pos_ptr = &model.pos_emb.data[(size_t)pos * dim];
+  for (int d = 0; d < dim; ++d)
+    x[d] = tok_ptr[d] + pos_ptr[d];
+
+  int l_idx = 0;
+  for (auto &layer : model.layers) {
+    memcpy(ws.xt.data(), x, dim * sizeof(float));
+    rms_norm(ws.xt, layer.ln1.data, ws.xn, dim);
+
+    bit_linear(ws.xn, layer.q_w, ws.q, ws.scratch_q, ws.acc32);
+    bit_linear(ws.xn, layer.k_w, ws.k, ws.scratch_q, ws.acc32);
+    bit_linear(ws.xn, layer.v_w, ws.v, ws.scratch_q, ws.acc32);
+
+    memcpy(cache.k_row(l_idx, pos), ws.k.data(), dim * sizeof(float));
+    memcpy(cache.v_row(l_idx, pos), ws.v.data(), dim * sizeof(float));
+
+    float *attn = &ws.AttnOut[(size_t)pos * dim];
+    fill(attn, attn + dim, 0.0f);
+
+    for (int h = 0; h < heads; ++h) {
+      float *q_ptr = &ws.q[h * head_dim];
+      float *out_ptr = &attn[h * head_dim];
+      vector<float> scores;
+      scores.reserve(pos + 1);
+
+      for (int src = 0; src <= pos; ++src) {
+        float *k_ptr = cache.k_row(l_idx, src) + h * head_dim;
+        float dp = 0.0f;
+        for (int d = 0; d < head_dim; ++d)
+          dp += q_ptr[d] * k_ptr[d];
+        scores.push_back(dp / sqrt((float)head_dim));
+      }
+      softmax(scores);
+
+      for (int src = 0; src <= pos; ++src) {
+        float w = scores[src];
+        float *v_ptr = cache.v_row(l_idx, src) + h * head_dim;
+        for (int d = 0; d < head_dim; ++d)
+          out_ptr[d] += w * v_ptr[d];
+      }
+    }
+
+    memcpy(ws.xt.data(), attn, dim * sizeof(float));
+    bit_linear(ws.xt, layer.o_w, ws.layer_out, ws.scratch_q, ws.acc32);
+    for (int i = 0; i < dim; ++i)
+      x[i] += ws.layer_out[i];
+
+    memcpy(ws.xt.data(), x, dim * sizeof(float));
+    rms_norm(ws.xt, layer.ln2.data, ws.xn, dim);
+
+    int hidden = 4 * dim;
+    bit_linear(ws.xn, layer.fc1_w, ws.fc_act, ws.scratch_q, ws.acc32);
+    for (int i = 0; i < hidden; ++i)
+      ws.fc_act[i] = gelu(ws.fc_act[i]);
+    bit_linear(ws.fc_act, layer.fc2_w, ws.mlp_out, ws.scratch_q, ws.acc32);
+    for (int i = 0; i < dim; ++i)
+      x[i] += ws.mlp_out[i];
+
+    l_idx++;
+  }
+
+  memcpy(ws.xt.data(), x, dim * sizeof(float));
+  rms_norm(ws.xt, model.ln_f.data, ws.xn, dim);
+  bit_linear(ws.xn, model.head_w, logits, ws.scratch_q, ws.acc32);
 }
 
 // Sampling: temperature + optional top-k + optional top-p (nucleus).
@@ -703,6 +849,10 @@ int main(int argc, char **argv) {
   Workspace ws;
   ws.ensure_size(model.config.max_seq_len, model.config.dim);
 
+  KVCache cache;
+  cache.init(model.config.depth, model.config.max_seq_len, model.config.dim);
+  int t_offset = model.config.has_gist ? 1 : 0;
+
   vector<int> generated;
   auto start_time = std::chrono::high_resolution_clock::now();
 
@@ -711,10 +861,25 @@ int main(int argc, char **argv) {
       context.erase(context.begin(),
                     context.begin() +
                         ((int)context.size() - model.config.max_seq_len));
+      // Sliding the window rebases every learned position embedding, so the
+      // cached K/V rows are stale: refill from scratch this step.
+      cache.len = -1;
     }
 
     vector<float> logits(model.config.vocab_size);
-    forward(model, context, logits, ws, parity_mode);
+    if ((int)context.size() + t_offset <= model.config.max_seq_len) {
+      if (cache.len == (int)context.size() - 1 + t_offset) {
+        // Cache holds every position but the new last token: decode just it.
+        forward_one(model, context.back(), cache.len, logits, ws, cache);
+        cache.len++;
+      } else {
+        forward(model, context, logits, ws, cache, parity_mode);
+      }
+    } else {
+      // Same bound as forward()'s early return: nothing to run, logits stay
+      // zeroed (reached only with a gist, when tokens fill the whole window).
+      cache.len = -1;
+    }
     int next_token = sample_logits(logits, temp, top_k, top_p, rng);
     generated.push_back(next_token);
     context.push_back(next_token);
