@@ -6,8 +6,15 @@
  * 1. Board: "M5Stack-STAMPS3" (or "ESP32S3 Dev Module")
  * 2. PSRAM: "OPI PSRAM" (Enabled) - CRITICAL!
  * 3. USB Mode: "Hardware CDC and JTAG"
- * 4. Copy 'atomic_model.bin' to MicroSD card root.
- * 5. Ensure 'M5Cardputer' library is installed.
+ * 4. Export a model: python3 atomic_1bit/utils/export_to_cpp.py \
+ *      --model <ckpt>.pt --output atomic_model.bin --dim ... --depth ...
+ *    (v3 format is default; v2 files also load)
+ * 5. Copy 'atomic_model.bin' to MicroSD card root.
+ * 6. Ensure 'M5Cardputer' library is installed.
+ *
+ * NOTE: the "tokenizer" here is a stub — keyboard characters are fed as
+ * token ids and generated ids print as raw chars. It demonstrates the
+ * engine, not text quality; wire a real vocab map for sensible output.
  */
 
 #include <M5Cardputer.h>
@@ -15,6 +22,7 @@
 #include <SD.h>
 #include <vector>
 #include <cmath>
+#include <cstring>
 
 // --- Cardputer SD Pins ---
 #define SD_SPI_SCK  40
@@ -35,11 +43,20 @@ struct AtomicConfig {
 };
 
 // --- LAYERS ---
+// Quantized weight: unpacked ternary int8 codes in (in_dim, out_dim) row-major
+// order plus the float32 scale the exporter wrote ahead of the packed blob.
+struct TensorI8 {
+    vector<int8_t> data;
+    float scale = 1.0f;
+    int rows = 0; // in_dim
+    int cols = 0; // out_dim
+};
+
 struct AtomicLayer {
     vector<float> ln1;
-    vector<int8_t> q_w, k_w, v_w, o_w;
+    TensorI8 q_w, k_w, v_w, o_w;
     vector<float> ln2;
-    vector<int8_t> fc1_w, fc2_w;
+    TensorI8 fc1_w, fc2_w;
 };
 
 struct AtomicModel {
@@ -47,7 +64,7 @@ struct AtomicModel {
     vector<float> token_emb;
     vector<float> pos_emb;
     vector<float> ln_f;
-    vector<int8_t> head_w;
+    TensorI8 head_w;
     vector<AtomicLayer> layers;
     vector<float> gist_vector;
 };
@@ -76,80 +93,173 @@ void softmax(vector<float> &x) {
     for (float &f : x) f /= sum;
 }
 
-// 1.58-bit Linear
-void bit_linear(const vector<float> &x, const vector<int8_t> &w, vector<float> &out) {
+// 1.58-bit Linear — mirrors embedded/atomic_runner.cpp::bit_linear:
+// internal non-affine RMSNorm, int8 activation quant, add/sub ternary
+// accumulate, then dequantize by the activation scale and weight scale.
+void bit_linear(const vector<float> &x, const TensorI8 &w, vector<float> &out) {
+    int in_dim = w.rows;
+    int out_dim = w.cols;
+
+    double sum_sq = 0.0;
+    for (float v : x) sum_sq += (double)v * (double)v;
+    float rms = sqrt((float)(sum_sq / in_dim) + 1e-5f);
+
     float max_val = 0.0f;
-    for (float f : x) max_val = max(max_val, abs(f));
-    float scale = 127.0f / max(max_val, 1e-5f);
+    for (float v : x) max_val = max(max_val, abs(v / rms));
+    if (max_val < 1e-5f) max_val = 1e-5f;
+    float quant_scale = 127.0f / max_val;
 
-    int dim = x.size();
-    int out_dim = out.size();
     static vector<int8_t> x_q; // Reuse memory
-    if(x_q.size() != dim) x_q.resize(dim);
-
-    for (int i = 0; i < dim; ++i) {
-        x_q[i] = (int8_t)max(-127.0f, min(127.0f, round(x[i] * scale)));
+    if ((int)x_q.size() != in_dim) x_q.resize(in_dim);
+    for (int i = 0; i < in_dim; ++i) {
+        float val = round((x[i] / rms) * quant_scale);
+        x_q[i] = (int8_t)max(-127.0f, min(127.0f, val));
     }
 
-    for (int o = 0; o < out_dim; ++o) {
-        int32_t acc = 0;
-        for (int i = 0; i < dim; ++i) {
-            acc += (int32_t)x_q[i] * (int32_t)w[i * out_dim + o];
-        }
-        out[o] = (float)acc / scale;
+    static vector<int32_t> acc32;
+    if ((int)acc32.size() < out_dim) acc32.resize(out_dim);
+    memset(acc32.data(), 0, out_dim * sizeof(int32_t));
+
+    for (int i = 0; i < in_dim; ++i) {
+        int32_t xv = x_q[i];
+        if (xv == 0) continue; // free sparsity
+        const int8_t *wrow = &w.data[(size_t)i * out_dim];
+        for (int j = 0; j < out_dim; ++j) acc32[j] += wrow[j] * xv;
     }
+
+    for (int j = 0; j < out_dim; ++j)
+        out[j] = ((float)acc32[j] / quant_scale) * w.scale;
 }
 
-// --- LOAD MODEL (STABLE VERSION) ---
+// Unpack 2-bit ternary codes (w+1 packed four per byte, low pair first)
+// into an (in_dim x out_dim) int8 tensor of {-1,0,1}.
+static bool read_packed_weight(File &f, int in_dim, int out_dim, TensorI8 &w) {
+    w.rows = in_dim;
+    w.cols = out_dim;
+    if (f.read((uint8_t*)&w.scale, sizeof(float)) != sizeof(float)) return false;
+    int count = in_dim * out_dim;
+    int packed_bytes = (count + 3) / 4;
+    vector<uint8_t> packed(packed_bytes);
+    if (f.read(packed.data(), packed_bytes) != packed_bytes) return false;
+    w.data.resize(count);
+    for (int i = 0; i < count; ++i) {
+        uint8_t code = (packed[i / 4] >> ((i % 4) * 2)) & 3;
+        w.data[i] = (int8_t)code - 1;
+    }
+    return true;
+}
+
+// v3 embedding block: all per-row f32 absmax scales, then all int8 codes.
+// v2 and earlier: raw f32 rows. Dequantizes to float32 either way.
+static bool read_embedding(File &f, int rows, int dim, int version,
+                           vector<float> &out) {
+    out.resize(rows * dim);
+    if (version >= 3) {
+        vector<float> scales(rows);
+        if (f.read((uint8_t*)scales.data(), rows * 4) != rows * 4) return false;
+        vector<int8_t> codes(dim);
+        for (int r = 0; r < rows; ++r) {
+            if (f.read((uint8_t*)codes.data(), dim) != dim) return false;
+            for (int d = 0; d < dim; ++d)
+                out[r * dim + d] = (float)codes[d] * scales[r];
+        }
+    } else {
+        if (f.read((uint8_t*)out.data(), rows * dim * 4) != rows * dim * 4)
+            return false;
+    }
+    return true;
+}
+
+// --- LOAD MODEL (format v2/v3) ---
+// Header: 8 x int32 {magic 'ATOM', version, vocab, dim, depth, heads,
+// context_len, has_gist}. v3 stores embeddings as int8 codes + f32 row
+// scales; v2 stores them raw f32. All other weights are f32 scale + 2-bit
+// packed ternary in both versions.
 bool load_model_sd(const char* filename) {
     File f = SD.open(filename, FILE_READ);
     if (!f) return false;
 
-    // Read Config
-    f.read((uint8_t*)&model.config, sizeof(AtomicConfig));
-    int dim = model.config.dim;
+    int32_t header[8];
+    if (f.read((uint8_t*)header, sizeof(header)) != sizeof(header)) {
+        f.close();
+        return false;
+    }
+    if ((uint32_t)header[0] != 0x41544F4D || (header[1] != 2 && header[1] != 3)) {
+        M5Cardputer.Display.println("\nBad magic/version");
+        f.close();
+        return false;
+    }
+    int version = header[1];
+    model.config.vocab_size = header[2];
+    model.config.dim = header[3];
+    model.config.depth = header[4];
+    model.config.heads = header[5];
+    model.config.max_seq_len = header[6];
+    model.config.has_gist = header[7];
 
-    // Read Gist
+    int dim = model.config.dim;
+    int vocab = model.config.vocab_size;
+    int ctx = model.config.max_seq_len;
+
     if (model.config.has_gist) {
         model.gist_vector.resize(dim);
-        f.read((uint8_t*)model.gist_vector.data(), dim * 4);
+        if (f.read((uint8_t*)model.gist_vector.data(), dim * 4) != dim * 4) {
+            f.close();
+            return false;
+        }
     }
 
-    // Read Embeddings
-    model.token_emb.resize(model.config.vocab_size * dim);
-    f.read((uint8_t*)model.token_emb.data(), model.token_emb.size() * 4);
-    
-    model.pos_emb.resize(model.config.max_seq_len * dim);
-    f.read((uint8_t*)model.pos_emb.data(), model.pos_emb.size() * 4);
+    if (!read_embedding(f, vocab, dim, version, model.token_emb) ||
+        !read_embedding(f, ctx, dim, version, model.pos_emb)) {
+        f.close();
+        return false;
+    }
 
-    // Read Layers
     for (int i = 0; i < model.config.depth; ++i) {
         AtomicLayer layer;
-        layer.ln1.resize(dim); f.read((uint8_t*)layer.ln1.data(), dim * 4);
-        
-        int sq = dim*dim;
-        layer.q_w.resize(sq); f.read((uint8_t*)layer.q_w.data(), sq);
-        layer.k_w.resize(sq); f.read((uint8_t*)layer.k_w.data(), sq);
-        layer.v_w.resize(sq); f.read((uint8_t*)layer.v_w.data(), sq);
-        layer.o_w.resize(sq); f.read((uint8_t*)layer.o_w.data(), sq);
-        
-        layer.ln2.resize(dim); f.read((uint8_t*)layer.ln2.data(), dim * 4);
-        
-        int fc1 = dim * (dim*4);
-        int fc2 = (dim*4) * dim;
-        layer.fc1_w.resize(fc1); f.read((uint8_t*)layer.fc1_w.data(), fc1);
-        layer.fc2_w.resize(fc2); f.read((uint8_t*)layer.fc2_w.data(), fc2);
-        
+        layer.ln1.resize(dim);
+        if (f.read((uint8_t*)layer.ln1.data(), dim * 4) != dim * 4) {
+            f.close();
+            return false;
+        }
+
+        if (!read_packed_weight(f, dim, dim, layer.q_w) ||
+            !read_packed_weight(f, dim, dim, layer.k_w) ||
+            !read_packed_weight(f, dim, dim, layer.v_w) ||
+            !read_packed_weight(f, dim, dim, layer.o_w)) {
+            f.close();
+            return false;
+        }
+
+        layer.ln2.resize(dim);
+        if (f.read((uint8_t*)layer.ln2.data(), dim * 4) != dim * 4) {
+            f.close();
+            return false;
+        }
+
+        int hidden = dim * 4;
+        if (!read_packed_weight(f, dim, hidden, layer.fc1_w) ||
+            !read_packed_weight(f, hidden, dim, layer.fc2_w)) {
+            f.close();
+            return false;
+        }
+
         model.layers.push_back(layer);
-        
+
         // --- STABILITY FIX ---
         M5Cardputer.Display.print("."); // Show progress
         delay(10); // Prevent Watchdog Timeout!
     }
 
-    // Read Final
-    model.ln_f.resize(dim); f.read((uint8_t*)model.ln_f.data(), dim * 4);
-    model.head_w.resize(dim * model.config.vocab_size); f.read((uint8_t*)model.head_w.data(), dim * model.config.vocab_size);
+    model.ln_f.resize(dim);
+    if (f.read((uint8_t*)model.ln_f.data(), dim * 4) != dim * 4) {
+        f.close();
+        return false;
+    }
+    if (!read_packed_weight(f, dim, vocab, model.head_w)) {
+        f.close();
+        return false;
+    }
 
     f.close();
     return true;

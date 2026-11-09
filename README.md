@@ -5,7 +5,7 @@
 
 # Atomic-1Bit
 
-**Run language models using only addition and subtraction.** Atomic-1Bit is a bare-metal inference engine for 1.58-bit ternary models (BitNet b1.58) that replaces floating-point matrix multiplication with integer add/sub operations, cutting model size by 62% and enabling deployment on devices as small as an ESP32.
+**Run language models using only addition and subtraction.** Atomic-1Bit is a bare-metal inference engine for 1.58-bit ternary models (BitNet b1.58) that replaces floating-point matrix multiplication with integer add/sub operations, cutting model size by over 90% and enabling deployment on devices as small as an ESP32.
 
 ## Why Atomic-1Bit?
 
@@ -22,7 +22,7 @@ weight ==  0  ->  skip  (free sparsity)
 The result is a full transformer that runs on **integer arithmetic only**. No CUDA required. No FP16. No matrix multiply units. Just `add` and `sub` instructions that work on any processor manufactured in the last 30 years.
 
 **This matters because:**
-- A 6.85M parameter model drops from **27.4 MB to 5.8 MB** (-79%)
+- A 6.85M parameter model drops from **27.4 MB to 2.6 MB** (-91%)
 - The C++ runtime has **zero external dependencies** -- it's a single binary
 - It runs on a **Raspberry Pi**, an **ESP32**, or a **2015 laptop**
 - The ternary kernel is **bit-exact** against the NumPy reference, and the C++
@@ -40,15 +40,22 @@ Quick Start config below (256d, 6 layers, 4 heads, 4096 vocab, 6.85M params):
 
 | Metric | FP32 Baseline | Atomic-1Bit | Improvement |
 |:---|:---|:---|:---|
-| **Model Size** | 27.4 MB | **5.8 MB** | **-79%** |
+| **Model Size** | 27.4 MB | **2.6 MB** | **-91%** |
 | **Parameters** | 6.85M | 6.85M | Same |
 | **Precision** | Float32 | Ternary {-1, 0, 1} | -- |
-| **Throughput (C++)** | N/A | **~170-185 TPS** | Portable runtime |
+| **Throughput (C++)** | N/A | **~3,300-3,500 TPS** | KV-cached decode |
 
-The C++ runner recomputes the full prefix each step rather than keeping a
-KV-cache, so throughput falls off as the sequence grows -- generation is
-O(n^2) in the number of tokens. The Python path (`AtomicTransformer.generate`)
-*does* cache. Reproduce with `benchmarks/run_suite.py`.
+The C++ runner keeps a per-layer KV cache during generation, so each decoded
+token costs a single-token forward pass instead of recomputing the full
+prefix: per-token cost is O(1) in the number of tokens already generated.
+Measured on the config above, throughput holds at ~3.1-3.5k TPS at both 50
+and 100 generated tokens, where the old recompute-everything path fell from
+~170 to ~83 TPS as the sequence grew. One honest caveat: positions are learned
+absolute embeddings, so once the sequence exceeds `context_length` the window
+slides, every cached position shifts, and the runner falls back to a full
+prefix recompute per step -- the old cost -- for the rest of the run. The
+Python path (`AtomicTransformer.generate`) caches the same way. Reproduce
+with `benchmarks/run_suite.py`.
 
 <details>
 <summary>Visual benchmarks</summary>
@@ -72,7 +79,7 @@ laptop) gives:
 | Distinct trigram ratio | 0.98 |
 | 5-gram repetition rate | 0.00 |
 
-Sampled from the C++ engine at `temp 0.8`, reading a 5.6 MB packed binary:
+Sampled from the C++ engine at `temp 0.8`, reading a 2.6 MB packed binary:
 
 ```
 One day, "Let, He would the king. "What, Ben?" "" ?" Ben said said, I said,
@@ -106,11 +113,17 @@ pip install -r requirements.txt
 
 ### Build the ternary kernel
 
-The Python inference path loads a shared library, so build it first:
+The Python inference path loads a shared library, `libatomic.so`. It builds
+itself automatically the first time it is needed (via `make` in
+`atomic_1bit/core/`), or you can build everything -- kernel plus the C++
+runner -- and prove the install in one shot:
 
 ```bash
-make -C atomic_1bit/core          # produces atomic_1bit/core/libatomic.so
+make verify    # builds libatomic.so + embedded/runner, checks parity, runs the demo
 ```
+
+The kernel needs make and a C++17 compiler; if the automatic build fails,
+the import error says exactly what to run.
 
 ### Verify the kernel works
 
@@ -209,7 +222,7 @@ atomic_1bit/
 embedded/         Standalone C++ runner + ESP32 port guide
 configs/          Model presets (4K pocket to 12.5M flagship)
 benchmarks/       Reproducible benchmark suite vs FP16 baselines
-tests/            149 pytest tests for correctness verification
+tests/            179 pytest tests for correctness verification
 scripts/          Plotting, evaluation, and reproduction scripts
 docs/             Installation, usage, commands, benchmarking guides
 examples/         Runnable example scripts
@@ -221,22 +234,23 @@ examples/         Runnable example scripts
 
 | Config | Parameters | Exported size | Dimensions | Use Case |
 |:---|:---|:---|:---|:---|
-| [`pocket_4k`](configs/pocket_4k.yaml) | 5.28M | 5.4 MB | 256d, 4L, 4H, 4K vocab | Smallest preset |
-| [`stories_base`](configs/stories_base.yaml) | 30.5M | 56.0 MB | 256d, 6L, 4H, 50257 vocab | Development / testing |
-| [`flagship_12m`](configs/flagship_12m.yaml) | 12.5M | 8.4 MB | 320d, 8L, 5H, 4K vocab | Quality demos |
+| [`pocket_4k`](configs/pocket_4k.yaml) | 5.28M | 2.2 MB | 256d, 4L, 4H, 4K vocab | Smallest preset |
+| [`stories_base`](configs/stories_base.yaml) | 6.85M | 2.6 MB | 256d, 6L, 4H, 4K vocab | Development / testing |
+| [`flagship_12m`](configs/flagship_12m.yaml) | 12.5M | 4.2 MB | 320d, 8L, 5H, 4K vocab | Quality demos |
 | [`mixed_precision`](configs/mixed_precision.yaml) | Configurable | -- | Hybrid 1.58/4-bit | Experimental |
 
-Ternary weights are packed four per byte, so what dominates the file is now the
-token embedding table, which stays float32 (`vocab_size x dim x 4` bytes) --
-vocabulary size, not depth, drives size. `stories_base.yaml` ships with the
-50257-entry GPT-2 vocabulary; the Quick Start above passes `--vocab_size 4096`
-instead, giving a 6.85M-parameter model that exports to 5.8 MB. Set the
-vocabulary deliberately for your target.
+Exported sizes are format v3, measured on this repo: ternary weights are
+packed four per byte and each embedding row is stored as int8 codes with a
+float32 absmax scale, so total parameters -- and still vocabulary size more
+than depth -- drive the file. `stories_base.yaml` uses the same 4096-entry
+vocabulary as the Quick Start, giving a 6.85M-parameter model that exports to
+2.6 MB; the v2 layout with float32 embeddings was 5.8 MB. Set the vocabulary
+deliberately for your target.
 
-`pocket_4k` and `flagship_12m` now fit 8 MB ESP32 flash. Neither fits in SRAM,
-so on-device inference streams weights from flash: see
-[embedded/ESP32_PORT_GUIDE.md](embedded/ESP32_PORT_GUIDE.md). Quantizing the
-embedding table is the next lever if you need smaller.
+All three presets now fit 8 MB ESP32 flash. None fits in SRAM -- loaders
+dequantize embeddings to float32, so RAM cost is unchanged -- and on-device
+inference still streams weights from flash: see
+[embedded/ESP32_PORT_GUIDE.md](embedded/ESP32_PORT_GUIDE.md).
 
 Load any config with:
 

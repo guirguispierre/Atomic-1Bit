@@ -12,6 +12,9 @@ atomic_model.bin
 *.pt
 weights/
 
+# Except the small fixture checkpoint that parity/eval tests run on
+!checkpoints/*.pt
+
 # Metal Artifacts
 *.metallib
 *.air

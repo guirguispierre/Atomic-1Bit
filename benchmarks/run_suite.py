@@ -119,6 +119,50 @@ def benchmark_inference(model, device="cpu"):
     
     return tps, peak_mb
 
+def ensure_cpp_artifacts(model):
+    """Build embedded/runner and embedded/atomic_model.bin if they do not
+    exist, so a fresh clone can run the suite without manual steps.
+
+    Returns (runner_ok, bin_ok) so the caller can skip the C++ run cleanly
+    on machines without a C++ toolchain.
+    """
+    runner_path = get_path("embedded/runner")
+    bin_path = get_path("embedded/atomic_model.bin")
+
+    if os.path.exists(runner_path):
+        print("  Using existing embedded/runner")
+    else:
+        print("  embedded/runner not found; building "
+              "(g++ -O3 -std=c++17 atomic_runner.cpp -o runner)...")
+        try:
+            proc = subprocess.run(
+                ["g++", "-O3", "-std=c++17", "atomic_runner.cpp", "-o", "runner"],
+                cwd=get_path("embedded"),
+                capture_output=True,
+                text=True,
+            )
+            if proc.returncode != 0:
+                tail = (proc.stderr or proc.stdout or "").strip()
+                print(f"  runner build failed (exit {proc.returncode}): {tail[:500]}")
+            else:
+                print("  Built embedded/runner")
+        except OSError as e:
+            print(f"  could not run g++ ({e}); C++ benchmark will be skipped")
+
+    if os.path.exists(bin_path):
+        print("  Using existing embedded/atomic_model.bin")
+    else:
+        print("  embedded/atomic_model.bin not found; exporting the benchmark "
+              "model built above (random weights unless a checkpoint loaded)...")
+        try:
+            from atomic_1bit.utils.export_to_cpp import export_model
+            export_model(model, bin_path)
+        except Exception as e:
+            print(f"  model export failed ({e}); C++ benchmark will be skipped")
+
+    return os.path.exists(runner_path), os.path.exists(bin_path)
+
+
 def run_benchmarks():
     print("--- BENCHMARK SUITE (Revised) ---")
     print(f"Platform: {platform.system()} {platform.release()} ({platform.machine()})")
@@ -179,41 +223,46 @@ def run_benchmarks():
 
     # 3. C++ Atomic
     print("\n[Atomic C++]")
-    
+
+    runner_ok, bin_ok = ensure_cpp_artifacts(model)
+
     bin_path = get_path("embedded/atomic_model.bin")
     if os.path.exists(bin_path):
         results["CPP"]["SizeMB"] = os.path.getsize(bin_path) / (1024 * 1024)
     else:
         results["CPP"]["SizeMB"] = 0
-        
-    print(f"  Binary Size: {results['CPP']['SizeMB']:.2f} MB")
-    
-    # Run C++ binary
-    try:
-        cmd = ["./runner"]
-        cwd = get_path("embedded")
-        print(f"  Running: {cmd} in {cwd}")
-        p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
-        # print(p.stdout) # Optional: Be verbose? User asked for minimal.
-        
-        # Parse output for TPS
-        tps_found = False
-        for line in p.stdout.splitlines():
-            if "TPS:" in line:
-                try:
-                    val = float(line.split(":")[1].strip())
-                    results["CPP"]["TPS"] = val
-                    print(f"  TPS: {val:.2f}")
-                    tps_found = True
-                except (ValueError, IndexError):
-                    pass
-        
-        if not tps_found:
-             print("  Warning: Could not parse TPS from C++ output.")
-             print("  Output snippet:", p.stdout[:200])
 
-    except Exception as e:
-        print(f"  C++ Run Failed: {e}")
+    print(f"  Binary Size: {results['CPP']['SizeMB']:.2f} MB")
+
+    if not (runner_ok and bin_ok):
+        print("  Skipping C++ run: required artifacts are missing (see above).")
+    else:
+        # Run C++ binary
+        try:
+            cmd = ["./runner"]
+            cwd = get_path("embedded")
+            print(f"  Running: {cmd} in {cwd}")
+            p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+            # print(p.stdout) # Optional: Be verbose? User asked for minimal.
+
+            # Parse output for TPS
+            tps_found = False
+            for line in p.stdout.splitlines():
+                if "TPS:" in line:
+                    try:
+                        val = float(line.split(":")[1].strip())
+                        results["CPP"]["TPS"] = val
+                        print(f"  TPS: {val:.2f}")
+                        tps_found = True
+                    except (ValueError, IndexError):
+                        pass
+
+            if not tps_found:
+                print("  Warning: Could not parse TPS from C++ output.")
+                print("  Output snippet:", p.stdout[:200])
+
+        except Exception as e:
+            print(f"  C++ Run Failed: {e}")
 
     # 4. Save Results
     with open(get_path("benchmarks/results.json"), "w") as f:

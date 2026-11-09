@@ -200,7 +200,7 @@ The ATOM format is a custom binary serialization designed for embedded deploymen
 │                    HEADER (32 bytes)                    │
 ├─────────────────────────────────────────────────────────┤
 │  0-3   : Magic Bytes (0x41544F4D = "ATOM")             │
-│  4-7   : Version (uint32, currently 1)                  │
+│  4-7   : Version (uint32, currently 3)                  │
 │  8-11  : Vocabulary Size (uint32)                       │
 │  12-15 : Model Dimension (uint32)                       │
 │  16-19 : Depth (number of layers, uint32)               │
@@ -216,10 +216,15 @@ The ATOM format is a custom binary serialization designed for embedded deploymen
 └─────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────┐
-│                     EMBEDDINGS                          │
+│                     EMBEDDINGS (v3)                     │
 ├─────────────────────────────────────────────────────────┤
-│  Token Embeddings: VocabSize × Dim (float32)            │
-│  Position Embeddings: ContextLength × Dim (float32)     │
+│  Token Embeddings:                                      │
+│    - Row scales: VocabSize (float32)                    │
+│    - Codes: VocabSize × Dim (int8)                      │
+│  Position Embeddings:                                   │
+│    - Row scales: ContextLength (float32)                │
+│    - Codes: ContextLength × Dim (int8)                  │
+│  (v2 files store both tables as raw float32 instead)    │
 └─────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────┐
@@ -231,7 +236,7 @@ The ATOM format is a custom binary serialization designed for embedded deploymen
 │  Attention (Q, K, V, O projections):                    │
 │    For each projection:                                 │
 │      - Scale: 1 (float32)                               │
-│      - Weights: Dim × Dim (int8, transposed)            │
+│      - Weights: Dim × Dim (ternary, 4 per byte)         │
 │                                                         │
 │  Layer Norm 2:                                          │
 │    - Weights: Dim (float32)                             │
@@ -239,7 +244,7 @@ The ATOM format is a custom binary serialization designed for embedded deploymen
 │  MLP (fc1, fc2):                                        │
 │    For each layer:                                      │
 │      - Scale: 1 (float32)                               │
-│      - Weights: Out × In (int8, transposed)             │
+│      - Weights: Out × In (ternary, 4 per byte)          │
 └─────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────┐
@@ -250,7 +255,7 @@ The ATOM format is a custom binary serialization designed for embedded deploymen
 │                                                         │
 │  Output Head:                                           │
 │    - Scale: 1 (float32)                                 │
-│    - Weights: VocabSize × Dim (int8, transposed)        │
+│    - Weights: VocabSize × Dim (ternary, 4 per byte)     │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -263,7 +268,7 @@ All integers are **little-endian uint32**.
 | Offset | Field            | Type    | Description                           |
 |--------|------------------|---------|---------------------------------------|
 | 0      | Magic            | uint32  | 0x41544F4D ("ATOM")                   |
-| 4      | Version          | uint32  | Format version (1)                    |
+| 4      | Version          | uint32  | Format version (2 or 3 accepted)      |
 | 8      | vocab_size       | uint32  | Vocabulary size                       |
 | 12     | dim              | uint32  | Model dimension                       |
 | 16     | depth            | uint32  | Number of transformer layers          |
@@ -273,15 +278,23 @@ All integers are **little-endian uint32**.
 
 #### Weight Storage
 
-**Float32 weights** (embeddings, normalization):
+**Float32 weights** (normalization layers):
 - Stored as IEEE 754 single-precision floats
 - Little-endian byte order
 - Row-major layout
 
-**Quantized INT8 weights** (BitLinear projections):
+**Embedding tables** (version 3):
+- Each row is quantized to int8 by its own absmax: `scale[r] = max(|w[r]|)/127`,
+  `code[r,d] = round(w[r,d]/scale[r])` clamped to `[-127, 127]`
+- Layout per table: all `rows` float32 scales, then all `rows * dim` int8 codes
+- Loaders dequantize to `code * scale` float32 at load time
+- Version 2 files store these tables as raw float32; loaders accept both
+
+**Quantized ternary weights** (BitLinear projections):
 - **Transposed**: Stored as (In, Out) instead of PyTorch's (Out, In)
 - Preceded by a float32 scale factor
-- Each weight is a signed 8-bit integer {-1, 0, 1}
+- Each weight is in {-1, 0, 1}, stored as `w + 1` and packed four per byte
+  (2-bit codes {0, 1, 2}, low-order pair first, final byte zero-padded)
 - Row-major layout after transpose
 
 **Why transpose?** C++ inference iterates over output dimensions in the outer loop. Transposed storage provides cache-friendly sequential access patterns.
@@ -294,10 +307,11 @@ Given a 320-dim model with 5 heads (head_dim = 64):
 Offset (hex)  | Data               | Interpretation
 --------------+--------------------+----------------------------------
 0x0000        | 4D 4F 54 41        | Magic "ATOM"
-0x0004        | 01 00 00 00        | Version = 1
+0x0004        | 03 00 00 00        | Version = 3
 ...
 0x0020        | Scale (4 bytes)    | Scale factor for dequantization
-0x0024        | -1 0 1 1 0 -1 ...  | 320 × 320 = 102,400 INT8 weights
+0x0024        | packed bytes       | 320 × 320 = 102,400 ternary weights
+              |                    | in 25,600 bytes (4 codes per byte)
 ```
 
 ### Loading in C++
@@ -330,9 +344,20 @@ if (header.has_gist) {
     fread(gist, sizeof(float), header.dim, f);
 }
 
-// Read token embeddings
+// Read token embeddings (v3 layout: per-row scales, then int8 codes)
 float* token_emb = new float[header.vocab_size * header.dim];
-fread(token_emb, sizeof(float), header.vocab_size * header.dim, f);
+if (header.version >= 3) {
+    float* scales = new float[header.vocab_size];
+    int8_t* codes = new int8_t[header.vocab_size * header.dim];
+    fread(scales, sizeof(float), header.vocab_size, f);
+    fread(codes, 1, header.vocab_size * header.dim, f);
+    for (uint32_t i = 0; i < header.vocab_size * header.dim; i++)
+        token_emb[i] = (float)codes[i] * scales[i / header.dim];
+    delete[] scales; delete[] codes;
+} else {
+    // v2: raw float32 table
+    fread(token_emb, sizeof(float), header.vocab_size * header.dim, f);
+}
 ```
 
 ---

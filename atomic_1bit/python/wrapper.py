@@ -1,14 +1,52 @@
 import ctypes
 import os
+import subprocess
 import numpy as np
 
 # Load the shared library
 # Construct absolute path to ensure it loads correctly
 _CUR_DIR = os.path.dirname(os.path.abspath(__file__))
-_LIB_PATH = os.path.join(_CUR_DIR, "../core/libatomic.so")
+_CORE_DIR = os.path.normpath(os.path.join(_CUR_DIR, "../core"))
+_LIB_PATH = os.path.join(_CORE_DIR, "libatomic.so")
+
+
+def _try_build_libatomic():
+    """Attempt to build libatomic.so via the core Makefile.
+
+    Returns None on success, or a string describing the failure so the
+    caller can fold it into the FileNotFoundError below. Never raises:
+    a missing toolchain must not turn the import into a subprocess crash.
+    """
+    try:
+        proc = subprocess.run(
+            ["make", "-C", _CORE_DIR],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+    except OSError as e:
+        return f"could not run 'make -C {_CORE_DIR}' ({e})"
+    except subprocess.SubprocessError as e:
+        return f"'make -C {_CORE_DIR}' did not complete ({e})"
+
+    if proc.returncode != 0:
+        tail = (proc.stderr or proc.stdout or "").strip()
+        return f"'make -C {_CORE_DIR}' exited with code {proc.returncode}: {tail}"
+    if not os.path.exists(_LIB_PATH):
+        return f"'make -C {_CORE_DIR}' succeeded but {_LIB_PATH} is still missing"
+    return None
+
 
 if not os.path.exists(_LIB_PATH):
-    raise FileNotFoundError(f"Could not find shared library at {_LIB_PATH}. Did you run 'make' in core/?")
+    build_error = _try_build_libatomic()
+    if build_error is not None:
+        raise FileNotFoundError(
+            f"Could not find shared library at {_LIB_PATH}, and the automatic "
+            f"build failed: {build_error}.\n"
+            f"Build it manually with 'make -C {_CORE_DIR}' "
+            f"(requires make and a C++17 compiler)."
+        )
+    print(f"[atomic_1bit] Built {_LIB_PATH} (make -C {_CORE_DIR})")
 
 _lib = ctypes.CDLL(_LIB_PATH)
 

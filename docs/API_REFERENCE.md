@@ -80,7 +80,7 @@ Loads a binary model file produced by `atomic_1bit/utils/export_to_cpp.py` into 
 **Notes:**
 - The binary format does not include a magic-number check in this header version. The runner (`atomic_runner.cpp`) does validate the `ATOM` magic bytes and version before using this path.
 - Weights are stored in the following order: config header, optional gist vector, token embeddings, positional embeddings, per-layer weights (ln1, q/k/v/o, ln2, fc1, fc2), final norm, language model head.
-- Float tensors (`ln1`, `ln2`, `ln_f`, embeddings) are stored as raw `float32`. Ternary weight tensors are packed four per byte on disk and unpacked into `int8_t` with values in `{-1, 0, 1}` at load time.
+- Float tensors (`ln1`, `ln2`, `ln_f`) are stored as raw `float32`. Ternary weight tensors are packed four per byte on disk and unpacked into `int8_t` with values in `{-1, 0, 1}` at load time. Embedding tables are version-dependent: format v3 stores each row as `int8` codes with one `float32` absmax scale per row, v2 stores raw `float32`; both land in memory as `float32`.
 - The caller is responsible for keeping `model` alive for as long as inference runs, since `forward` holds non-owning pointers into the vectors.
 
 ---
@@ -238,7 +238,7 @@ The `.bin` files produced by `export_to_cpp.py` and consumed by `atomic_runner.c
 | Offset | Size | Type | Description |
 |--------|------|------|-------------|
 | 0 | 4 | `int32` | Magic: `0x41544F4D` ("ATOM") |
-| 4 | 4 | `int32` | Version: `2` |
+| 4 | 4 | `int32` | Version: `3` (v2 files remain readable) |
 | 8 | 4 | `int32` | `vocab_size` |
 | 12 | 4 | `int32` | `dim` |
 | 16 | 4 | `int32` | `depth` |
@@ -246,8 +246,10 @@ The `.bin` files produced by `export_to_cpp.py` and consumed by `atomic_runner.c
 | 24 | 4 | `int32` | `max_seq_len` |
 | 28 | 4 | `int32` | `has_gist` |
 | 32 | `dim * 4` | `float32[]` | Gist vector (only if `has_gist == 1`) |
-| ... | `vocab_size * dim * 4` | `float32[]` | Token embeddings |
-| ... | `max_seq_len * dim * 4` | `float32[]` | Positional embeddings |
+| ... | `vocab_size * 4` | `float32[]` | Token embedding row scales (v3 only) |
+| ... | `vocab_size * dim` | `int8[]` | Token embedding codes (v3; v2: `vocab_size * dim * 4` `float32[]`) |
+| ... | `max_seq_len * 4` | `float32[]` | Positional embedding row scales (v3 only) |
+| ... | `max_seq_len * dim` | `int8[]` | Positional embedding codes (v3; v2: `max_seq_len * dim * 4` `float32[]`) |
 | ... | (repeated `depth` times) | — | Layer weights (see below) |
 | ... | `dim * 4` | `float32[]` | Final RMSNorm scale |
 | ... | `4 + ceil(dim * vocab_size / 4)` | `float32 + packed[]` | LM head (scale + ternary weights) |
@@ -282,3 +284,21 @@ int8_t w = (int8_t)((packed[i >> 2] >> (2 * (i & 3))) & 3) - 1;
 still exposes plain `vector<int8_t>` and the inner loop is unchanged. The ESP32
 port decodes while streaming from flash instead, which is where the 4x
 reduction in reads matters.
+
+### Embedding quantization (version 3)
+
+The embedding tables are the largest tensors in the file, so version 3 stores
+them as int8 with per-row scales instead of raw float32. Each row `r` is
+quantized independently by its absmax:
+
+```
+scale[r] = max(|w[r, :]|) / 127          (clamped to >= 1e-8)
+code[r, d] = round(w[r, d] / scale[r])   (clamped to [-127, 127])
+```
+
+All `rows` scales are written first, then all `rows * dim` codes in row-major
+order. Loaders reconstruct `w[r, d] ~= code[r, d] * scale[r]` into the same
+float32 tables v2 used, so the forward pass is identical and runtime RAM does
+not change; only the file shrinks (~4x on each table). Reconstruction error is
+bounded at `scale[r] / 2` per element. A v2 file keeps the raw float32 layout
+and is still accepted.

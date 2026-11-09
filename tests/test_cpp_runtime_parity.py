@@ -1,4 +1,5 @@
 import os
+import struct
 import subprocess
 import sys
 
@@ -128,6 +129,56 @@ class TestCppRuntimeParity:
             f"{shortfall:.4f} below its own pick {int(py.argmax())} -- more "
             f"than the {delta:.3e} numerical difference explains"
         )
+
+
+class TestLegacyV2Format:
+    # guirguispierre 2026-11-08 - v3 shrinks embeddings to int8+scale, but the
+    # loader must keep accepting v2 files; re-exporting is a manual step users
+    # should not be forced into
+    def test_runner_still_loads_v2_export(self, tmp_path):
+        torch.manual_seed(1234)
+        model = AtomicTransformer(CFG)
+        model.eval()
+        path = tmp_path / "model_v2.bin"
+        export_model(model, str(path), format_version=2)
+
+        res = _run_runner(path, "--steps", "8", "--temp", "0",
+                          "--start_token", "7")
+        assert res.returncode == 0, (
+            f"v2 model failed to load.\nstdout:\n{res.stdout[-2000:]}\n"
+            f"stderr:\n{res.stderr[-2000:]}"
+        )
+        tokens = _generated_tokens(res)
+        assert len(tokens) == 8, f"expected 8 generated tokens, got {tokens!r}"
+
+    def test_v2_and_v3_logits_agree(self, tmp_path):
+        # v3 embeddings are a lossy encoding of the same table, so logits
+        # should land well inside the existing parity tolerance
+        torch.manual_seed(1234)
+        model = AtomicTransformer(CFG)
+        model.eval()
+        v2_path = tmp_path / "model_v2.bin"
+        v3_path = tmp_path / "model_v3.bin"
+        export_model(model, str(v2_path), format_version=2)
+        export_model(model, str(v3_path), format_version=3)
+
+        cpp_v2 = _cpp_logits(v2_path, 7)
+        cpp_v3 = _cpp_logits(v3_path, 7)
+        rel = ((cpp_v3 - cpp_v2).abs().max() / cpp_v2.abs().max()).item()
+        assert rel < AGREEMENT_TOL, (
+            f"v3 embeddings moved logits by {rel:.3e} relative -- more than "
+            f"the {AGREEMENT_TOL:.0e} quantization budget allows"
+        )
+
+    def test_runner_rejects_unknown_version(self, tmp_path):
+        path = tmp_path / "model_v99.bin"
+        header = struct.pack("iiiiiiii", 0x41544F4D, 99, 256, 64, 4, 4, 32, 0)
+        path.write_bytes(header + b"\x00" * 256)
+
+        res = _run_runner(path, "--steps", "1", "--temp", "0",
+                          "--start_token", "7")
+        assert res.returncode != 0
+        assert "Unsupported version" in res.stderr
 
 
 class TestRunnerCLI:

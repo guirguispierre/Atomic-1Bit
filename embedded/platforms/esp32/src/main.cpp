@@ -49,6 +49,31 @@ static float logits[VOCAB_SIZE];
 static float *token_emb = nullptr;
 static float *pos_emb = nullptr;
 
+// guirguispierre 2026-11-08 - v3 stores each embedding row as int8 codes plus
+// one float32 absmax scale per row (all scales first, then all codes); decode
+// a row at a time so only DIM bytes of scratch are needed on top of the fp32
+// destination buffer
+static bool read_embedding(File &file, float *out, int rows, int dim,
+                           bool quantized) {
+    if (!quantized) {
+        file.read((uint8_t *)out, (size_t)rows * dim * sizeof(float));
+        return true;
+    }
+    float *scales = (float *)malloc(rows * sizeof(float));
+    if (!scales)
+        return false;
+    file.read((uint8_t *)scales, rows * sizeof(float));
+    static int8_t row_buf[DIM];
+    for (int r = 0; r < rows; r++) {
+        file.read((uint8_t *)row_buf, dim);
+        float s = scales[r];
+        for (int d = 0; d < dim; d++)
+            out[r * dim + d] = (float)row_buf[d] * s;
+    }
+    free(scales);
+    return true;
+}
+
 // --- Core Operations ---
 
 static inline float gelu_approx(float x) {
@@ -180,8 +205,8 @@ void setup() {
         return;
     }
 
-    if (version != 2) {
-        Serial.printf("ERROR: model is v%d, this build needs v2\n", version);
+    if (version != 2 && version != 3) {
+        Serial.printf("ERROR: model is v%d, this build needs v2 or v3\n", version);
         return;
     }
 
@@ -210,8 +235,12 @@ void setup() {
         return;
     }
 
-    model_file.read((uint8_t *)token_emb, emb_size);
-    model_file.read((uint8_t *)pos_emb, pos_size);
+    bool emb_quantized = (version >= 3);
+    if (!read_embedding(model_file, token_emb, VOCAB_SIZE, DIM, emb_quantized) ||
+        !read_embedding(model_file, pos_emb, CONTEXT_LEN, DIM, emb_quantized)) {
+        Serial.println("ERROR: Failed to load embeddings!");
+        return;
+    }
 
     weight_data_offset = model_file.position();
     Serial.printf("Embeddings loaded. Weight data starts at offset %d\n",

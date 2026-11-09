@@ -19,6 +19,14 @@ git clone https://github.com/guirguispierre/Atomic-1Bit.git
 cd Atomic-1Bit
 ```
 
+### Verify (Clone to Proof)
+Builds the kernel and C++ runner, checks kernel parity, and runs the quickstart demo in one step.
+```bash
+make verify
+```
+- **Equivalent manual steps**: `make -C atomic_1bit/core`, `cd embedded && g++ -O3 -std=c++17 atomic_runner.cpp -o runner`, `python3 atomic_1bit/python/inference.py`, `python3 examples/quickstart.py`.
+- **Note**: `libatomic.so` also auto-builds on first Python import when a toolchain is present.
+
 ---
 
 ## 2. Training (Python)
@@ -89,7 +97,7 @@ python3 atomic_1bit/utils/export_to_cpp.py \
   - `--model`: Path to input `.pt` file.
   - `--output`: Path to output `.bin` file.
   - `--dim`, `--depth`, etc.: Must match the trained model config.
-- **Output**: `embedded/atomic_model.bin` (~2MB).
+- **Output**: `embedded/atomic_model.bin` (~2.6MB).
 
 ### Step 2: Build & Run C++ Engine
 Compiles the standalone C++ runner.
@@ -115,7 +123,26 @@ g++ -O3 -std=c++17 atomic_runner.cpp -o runner
   - `--start_token`: Single initial token ID (e.g., 58 for "Once").
   - `--prompt 1,2,3`: Comma-separated starting token IDs (overrides `--start_token`).
   - `--stream` / `--no-stream`: Stream tokens as generated (default on) vs. buffer until end.
+  - `--parity`: Print per-layer activation dumps and final logits for one step (no comparison by itself).
   - `--help`: Show all flags.
+
+### Step 3: Numeric Parity Check
+Compares the C++ runner's `--parity` dump against the PyTorch forward pass, probe by probe. Exports the `.bin` itself unless `--bin` is given; exits nonzero if any probe exceeds tolerance.
+
+```bash
+python3 tools/parity_check.py                     # checked-in fixture checkpoint
+python3 tools/parity_check.py --checkpoint weights/stories_final.pt \
+  --dim 256 --depth 6 --heads 4 --vocab-size 4096 --ctx 128
+```
+
+- **Flags**:
+  - `--checkpoint`: `.pt` to check (default: `checkpoints/tiny_stories.pt`, the small model checked in for exactly this).
+  - `--runner`: runner binary (default: `embedded/runner`).
+  - `--bin`: reuse an existing export instead of exporting to a temp file.
+  - `--prompt 12,34,56` / `--start-token N`: probe input (multi-token exercises attention across positions).
+  - `--tolerance`: max relative error per probe (default `5e-2`; see README "Numerical parity" for why the int8 quantizer makes last-ULP strictness meaningless).
+  - `--dim/--depth/--heads/--vocab-size/--ctx`: required only when the checkpoint stores no `config` dict.
+- **Exit codes**: `0` PASS, `1` numeric FAIL, `2` setup error.
 
 ---
 

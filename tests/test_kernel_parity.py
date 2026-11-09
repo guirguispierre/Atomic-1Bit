@@ -64,6 +64,10 @@ class TestKernelParity:
         """1x4096x4096: Large-scale stress test."""
         self._verify(M=1, N=4096, K=4096)
 
+    def test_odd_tail_dims(self):
+        """3x4095x127: every row hits SIMD remainder handling (K % 16 != 0)."""
+        self._verify(M=3, N=4095, K=127)
+
     def test_all_zeros_weights(self):
         """All-zero weights should produce all-zero output."""
         A = np.random.randint(-127, 128, size=(2, 32), dtype=np.int8)

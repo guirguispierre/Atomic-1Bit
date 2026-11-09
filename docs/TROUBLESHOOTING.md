@@ -107,13 +107,12 @@ sudo xcodebuild -license accept
 
 **Symptom:**
 ```
-FileNotFoundError: Could not find shared library at .../atomic_1bit/core/libatomic.so.
-Did you run 'make' in core/?
+FileNotFoundError: Could not find shared library at .../atomic_1bit/core/libatomic.so, and the automatic build failed: ...
 ```
 
-**Cause:** `atomic_1bit/python/wrapper.py` constructs an absolute path to `atomic_1bit/core/libatomic.so` and raises this error if the file does not exist.
+**Cause:** `atomic_1bit/python/wrapper.py` loads `atomic_1bit/core/libatomic.so` at import. When the file is missing the wrapper first tries to build it with `make -C atomic_1bit/core`; this error means that build also failed -- usually because make or a C++ compiler is not installed. The error message includes the make output.
 
-**Fix:** Build the shared library before using any Python inference code:
+**Fix:** Install a toolchain (Xcode command line tools on macOS: `xcode-select --install`; `sudo apt install build-essential` on Debian/Ubuntu), then build the shared library:
 ```bash
 cd atomic_1bit/core
 make            # CPU backend
@@ -309,9 +308,15 @@ python3 atomic_1bit/python/chat.py
 
 For a parity check between Python and C++ inference:
 ```bash
-python3 atomic_1bit/python/inference.py
-python3 tools/parity_check.py
+python3 atomic_1bit/python/inference.py   # kernel vs NumPy reference
+python3 tools/parity_check.py             # whole forward pass, numeric diff
 ```
+
+`parity_check.py` defaults to the checked-in fixture checkpoint
+(`checkpoints/tiny_stories.pt`); pass `--checkpoint` (and `--dim`/`--depth`/
+`--heads`/`--vocab-size`/`--ctx` if the file stores no config) for your own.
+It exits nonzero when any probe diverges past tolerance, so it is the fastest
+way to localize a Python↔C++ mismatch to a specific layer.
 
 ---
 

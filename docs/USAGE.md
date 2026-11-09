@@ -68,11 +68,33 @@ python3 atomic_1bit/python/chat.py
 
 ### Kernel Verification
 
-Verify C++ and Python produce identical output:
+Verify the ternary kernel matches the NumPy reference bit-exactly:
 
 ```bash
 python3 atomic_1bit/python/inference.py
 ```
+
+### Whole-Model Parity Check
+
+Verify the C++ engine's full forward pass agrees with PyTorch, probe by probe:
+
+```bash
+python3 tools/parity_check.py
+```
+
+This loads the checked-in fixture checkpoint (`checkpoints/tiny_stories.pt`),
+exports it to a temp `.bin`, runs `./runner --parity`, and diffs every dumped
+activation plus the final logits numerically. It prints a PASS/FAIL table and
+exits nonzero on failure. To check your own checkpoint:
+
+```bash
+python3 tools/parity_check.py --checkpoint weights/stories_final.pt \
+  --dim 256 --depth 6 --heads 4 --vocab-size 4096 --ctx 128
+```
+
+The default tolerance is 5e-2 relative per probe -- loose enough to ignore
+int8 quantizer boundary flips, tight enough to catch a diverged op. See the
+README "Numerical parity" section for the rationale.
 
 ### C++ Bare-Metal Inference
 
