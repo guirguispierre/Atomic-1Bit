@@ -1,8 +1,7 @@
-import pytest
 import torch
 
-from atomic_1bit.model.gist import GistEncoder, GistConfig
-from atomic_1bit.model.transformer import AtomicTransformer, AtomicConfig
+from atomic_1bit.model.gist import GistConfig, GistEncoder
+from atomic_1bit.model.transformer import AtomicConfig, AtomicTransformer
 
 
 class TestGistConfig:
@@ -48,7 +47,9 @@ class TestGistEncoder:
 class TestGistInjection:
     def test_gist_changes_output(self):
         """Injecting a gist token should change the model output."""
-        config = AtomicConfig(vocab_size=64, dim=32, depth=2, heads=4, context_length=16)
+        config = AtomicConfig(
+            vocab_size=64, dim=32, depth=2, heads=4, context_length=16
+        )
         model = AtomicTransformer(config)
         model.eval()
 

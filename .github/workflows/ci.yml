@@ -99,6 +99,26 @@ jobs:
           .coverage
         retention-days: 30
 
+  esp32:
+    name: ESP32 Firmware Build
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+
+    - name: Install PlatformIO
+      run: pip install platformio
+
+    - name: Compile ESP32 firmware
+      run: pio run -d embedded/platforms/esp32
+      timeout-minutes: 15
+
   metal:
     name: Metal Backend (macOS)
     runs-on: macos-latest

@@ -1,13 +1,14 @@
-import sys
+import argparse
 import os
+import sys
+
+import tiktoken
 import torch
 import torch.nn.functional as F
-import tiktoken
-import argparse
 
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from atomic_1bit.model.transformer import AtomicTransformer, AtomicConfig
+from atomic_1bit.model.transformer import AtomicConfig, AtomicTransformer  # noqa: E402
 
 
 def top_k_sampling(logits, k=50, temperature=1.0):
@@ -53,16 +54,45 @@ def infer_config_from_state_dict(sd):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoint", type=str, default="weights/final.pt", help="Path to weights")
+    parser.add_argument(
+        "--checkpoint", type=str, default="weights/final.pt", help="Path to weights"
+    )
     parser.add_argument("--temp", type=float, default=0.8)
     parser.add_argument("--k", type=int, default=40)
     parser.add_argument("--max_new_tokens", type=int, default=100)
-    parser.add_argument("--vocab_size", type=int, default=None, help="Override vocab size (auto-inferred if omitted)")
-    parser.add_argument("--dim", type=int, default=None, help="Override model dim (auto-inferred if omitted)")
-    parser.add_argument("--depth", type=int, default=None, help="Override model depth (auto-inferred if omitted)")
-    parser.add_argument("--heads", type=int, default=4, help="Number of attention heads")
-    parser.add_argument("--context_length", type=int, default=None, help="Override context length (auto-inferred if omitted)")
-    parser.add_argument("--device", type=str, default=None, help="cpu, mps, or cuda (auto-detected if omitted)")
+    parser.add_argument(
+        "--vocab_size",
+        type=int,
+        default=None,
+        help="Override vocab size (auto-inferred if omitted)",
+    )
+    parser.add_argument(
+        "--dim",
+        type=int,
+        default=None,
+        help="Override model dim (auto-inferred if omitted)",
+    )
+    parser.add_argument(
+        "--depth",
+        type=int,
+        default=None,
+        help="Override model depth (auto-inferred if omitted)",
+    )
+    parser.add_argument(
+        "--heads", type=int, default=4, help="Number of attention heads"
+    )
+    parser.add_argument(
+        "--context_length",
+        type=int,
+        default=None,
+        help="Override context length (auto-inferred if omitted)",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        help="cpu, mps, or cuda (auto-detected if omitted)",
+    )
     args = parser.parse_args()
 
     if args.device:
@@ -131,7 +161,9 @@ def main():
             with torch.no_grad():
                 logits = model(x)
                 next_token_logits = logits[:, -1, :]
-                next_token = top_k_sampling(next_token_logits, k=args.k, temperature=args.temp)
+                next_token = top_k_sampling(
+                    next_token_logits, k=args.k, temperature=args.temp
+                )
 
             word = enc.decode([next_token.item()])
             print(word, end="", flush=True)

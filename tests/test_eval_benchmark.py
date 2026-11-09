@@ -7,8 +7,9 @@ These tests verify that:
     known inputs—without needing a trained model or external dataset.
   - The benchmark run_suite module is importable.
 """
-import sys
+
 import os
+import sys
 
 import pytest
 
@@ -18,6 +19,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 # ---------------------------------------------------------------------------
 # Import smoke tests
 # ---------------------------------------------------------------------------
+
 
 class TestEvaluationImports:
     def test_import_perplexity(self):
@@ -31,9 +33,9 @@ class TestEvaluationImports:
 
     def test_import_diversity(self):
         from atomic_1bit.evaluation.diversity import (  # noqa: F401
+            diversity_metrics,
             unique_ngram_ratio,
             vocabulary_utilization,
-            diversity_metrics,
         )
 
     def test_import_coherence(self):
@@ -44,7 +46,10 @@ class TestEvaluationImports:
 
     def test_import_run_eval(self):
         """run_eval module (and its generate_text/run_evaluation) must import."""
-        from atomic_1bit.evaluation.run_eval import generate_text, run_evaluation  # noqa: F401
+        from atomic_1bit.evaluation.run_eval import (  # noqa: F401
+            generate_text,
+            run_evaluation,
+        )
 
 
 class TestBenchmarkImports:
@@ -74,6 +79,7 @@ class TestBenchmarkImports:
 # ---------------------------------------------------------------------------
 # Repetition metric correctness
 # ---------------------------------------------------------------------------
+
 
 class TestRepetitionMetrics:
     def test_all_unique_ngrams(self):
@@ -135,6 +141,7 @@ class TestRepetitionMetrics:
 # ---------------------------------------------------------------------------
 # Diversity metric correctness
 # ---------------------------------------------------------------------------
+
 
 class TestDiversityMetrics:
     def test_unique_ngram_ratio_all_unique(self):
@@ -203,14 +210,15 @@ class TestDiversityMetrics:
         text = "the cat the cat the cat"
         for n in (1, 2, 3):
             ratio = unique_ngram_ratio(text, n=n)
-            assert 0.0 <= ratio <= 1.0, (
-                f"unique_ngram_ratio for n={n} out of range: {ratio}"
-            )
+            assert (
+                0.0 <= ratio <= 1.0
+            ), f"unique_ngram_ratio for n={n} out of range: {ratio}"
 
 
 # ---------------------------------------------------------------------------
 # Perplexity: basic formula check (no model required)
 # ---------------------------------------------------------------------------
+
 
 class TestPerplexityFormula:
     def test_perplexity_with_mock_model(self):
@@ -221,7 +229,7 @@ class TestPerplexityFormula:
         known logits so we can reason about the expected value.
         """
         import torch
-        import torch.nn.functional as F
+
         from atomic_1bit.evaluation.perplexity import calculate_perplexity
 
         vocab_size = 8
@@ -229,6 +237,7 @@ class TestPerplexityFormula:
 
         class _ConstantLogitsModel:
             """Returns uniform logits for every forward call."""
+
             config = None  # not used by calculate_perplexity
 
             def eval(self):
@@ -257,8 +266,8 @@ class TestPerplexityFormula:
 
         # For uniform logits over vocab_size classes, PPL = vocab_size
         expected_ppl = vocab_size
-        assert ppl == pytest.approx(expected_ppl, rel=1e-3), (
-            f"Expected PPL ~{expected_ppl}, got {ppl}"
-        )
+        assert ppl == pytest.approx(
+            expected_ppl, rel=1e-3
+        ), f"Expected PPL ~{expected_ppl}, got {ppl}"
         assert ppl > 0
         assert torch.isfinite(torch.tensor(ppl))

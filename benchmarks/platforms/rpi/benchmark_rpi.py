@@ -27,8 +27,8 @@ import os
 import platform
 import subprocess
 import sys
-import time
 import threading
+import time
 
 # Add project root to path
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -36,12 +36,14 @@ sys.path.insert(0, ROOT_DIR)
 
 try:
     import psutil
+
     PSUTIL_AVAILABLE = True
 except ImportError:
     PSUTIL_AVAILABLE = False
 
 try:
     import torch
+
     TORCH_AVAILABLE = True
 except ImportError:
     TORCH_AVAILABLE = False
@@ -69,8 +71,7 @@ def get_cpu_temp():
     # Fallback: try vcgencmd (RPi-specific)
     try:
         result = subprocess.run(
-            ["vcgencmd", "measure_temp"],
-            capture_output=True, text=True, timeout=5
+            ["vcgencmd", "measure_temp"], capture_output=True, text=True, timeout=5
         )
         if result.returncode == 0:
             # Output: "temp=42.0'C"
@@ -177,10 +178,12 @@ class ThermalLogger:
         while not self._stop.is_set():
             temp = get_cpu_temp()
             if temp is not None:
-                self.readings.append({
-                    "time": time.monotonic(),
-                    "temp_c": temp,
-                })
+                self.readings.append(
+                    {
+                        "time": time.monotonic(),
+                        "temp_c": temp,
+                    }
+                )
             time.sleep(self.interval)
 
     def stop(self):
@@ -208,7 +211,7 @@ def benchmark_python(model_path, gen_steps, device="cpu"):
         print("  [SKIP] PyTorch not available")
         return None
 
-    from atomic_1bit.model.transformer import AtomicTransformer, AtomicConfig
+    from atomic_1bit.model.transformer import AtomicConfig, AtomicTransformer
 
     config = AtomicConfig(**POCKET_CONFIG)
     model = AtomicTransformer(config)
@@ -248,7 +251,7 @@ def benchmark_python(model_path, gen_steps, device="cpu"):
             next_token = logits[:, -1, :].argmax(dim=-1).unsqueeze(0)
             x = torch.cat([x, next_token], dim=1)
             if x.size(1) > POCKET_CONFIG["context_length"]:
-                x = x[:, -POCKET_CONFIG["context_length"]:]
+                x = x[:, -POCKET_CONFIG["context_length"] :]
 
     elapsed = time.perf_counter() - start
     peak_mb = mem_mon.stop()
@@ -271,7 +274,9 @@ def benchmark_cpp(bin_path, gen_steps, runner_path=None):
 
     if not os.path.exists(runner_path):
         print("  [SKIP] C++ runner not found at", runner_path)
-        print("  Build with: cd embedded && g++ -O3 -std=c++17 atomic_runner.cpp -o runner")
+        print(
+            "  Build with: cd embedded && g++ -O3 -std=c++17 atomic_runner.cpp -o runner"
+        )
         return None
 
     if not os.path.exists(bin_path):
@@ -286,9 +291,22 @@ def benchmark_cpp(bin_path, gen_steps, runner_path=None):
     start = time.perf_counter()
     try:
         result = subprocess.run(
-            [runner_path, "--model", bin_path, "--steps", str(gen_steps),
-             "--temp", "0.0", "--seed", "42", "--start_token", "58"],
-            capture_output=True, text=True, timeout=300,
+            [
+                runner_path,
+                "--model",
+                bin_path,
+                "--steps",
+                str(gen_steps),
+                "--temp",
+                "0.0",
+                "--seed",
+                "42",
+                "--start_token",
+                "58",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=300,
             cwd=os.path.dirname(runner_path),
         )
     except subprocess.TimeoutExpired:
@@ -327,16 +345,24 @@ def benchmark_cpp_no_simd(bin_path, gen_steps):
     Rebuilds the kernel with SIMD disabled, benchmarks, then restores.
     If rebuild is not possible, skips this benchmark.
     """
-    kernel_dir = os.path.join(ROOT_DIR, "atomic_1bit", "core")
     runner_src = os.path.join(ROOT_DIR, "embedded", "atomic_runner.cpp")
     runner_no_simd = os.path.join(ROOT_DIR, "embedded", "runner_no_simd")
 
     # Try to compile a no-SIMD version
     try:
         result = subprocess.run(
-            ["g++", "-O3", "-std=c++17", "-DDISABLE_SIMD",
-             runner_src, "-o", runner_no_simd],
-            capture_output=True, text=True, timeout=60,
+            [
+                "g++",
+                "-O3",
+                "-std=c++17",
+                "-DDISABLE_SIMD",
+                runner_src,
+                "-o",
+                runner_no_simd,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
             cwd=os.path.join(ROOT_DIR, "embedded"),
         )
         if result.returncode != 0:
@@ -360,18 +386,25 @@ def benchmark_cpp_no_simd(bin_path, gen_steps):
 
 def main():
     parser = argparse.ArgumentParser(description="Atomic-1Bit RPi Benchmark")
-    parser.add_argument("--model", type=str, default=None,
-                        help="Path to .pt checkpoint (for Python benchmark)")
-    parser.add_argument("--bin", type=str, default=None,
-                        help="Path to .bin model (for C++ benchmark)")
-    parser.add_argument("--steps", type=int, default=100,
-                        help="Number of tokens to generate")
-    parser.add_argument("--output", type=str, default=None,
-                        help="Output JSON file for results")
-    parser.add_argument("--skip-python", action="store_true",
-                        help="Skip Python benchmark")
-    parser.add_argument("--skip-cpp", action="store_true",
-                        help="Skip C++ benchmark")
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="Path to .pt checkpoint (for Python benchmark)",
+    )
+    parser.add_argument(
+        "--bin", type=str, default=None, help="Path to .bin model (for C++ benchmark)"
+    )
+    parser.add_argument(
+        "--steps", type=int, default=100, help="Number of tokens to generate"
+    )
+    parser.add_argument(
+        "--output", type=str, default=None, help="Output JSON file for results"
+    )
+    parser.add_argument(
+        "--skip-python", action="store_true", help="Skip Python benchmark"
+    )
+    parser.add_argument("--skip-cpp", action="store_true", help="Skip C++ benchmark")
     args = parser.parse_args()
 
     print("=" * 60)
@@ -395,31 +428,35 @@ def main():
 
     # Python benchmark
     if not args.skip_python:
-        print(f"\n--- Python/PyTorch Benchmark ---")
+        print("\n--- Python/PyTorch Benchmark ---")
         py_result = benchmark_python(args.model, args.steps)
         if py_result:
             results["python"] = py_result
             print(f"  TPS: {py_result['tps']}")
             print(f"  Peak RSS: {py_result['peak_rss_mb']} MB")
             if py_result["thermal"].get("available"):
-                print(f"  Temp: {py_result['thermal']['avg_c']:.1f} C avg, "
-                      f"{py_result['thermal']['max_c']:.1f} C max")
+                print(
+                    f"  Temp: {py_result['thermal']['avg_c']:.1f} C avg, "
+                    f"{py_result['thermal']['max_c']:.1f} C max"
+                )
 
     # C++ benchmark (with SIMD)
     if not args.skip_cpp:
         bin_path = args.bin or os.path.join(ROOT_DIR, "embedded", "atomic_model.bin")
 
-        print(f"\n--- C++ Benchmark (with NEON SIMD) ---")
+        print("\n--- C++ Benchmark (with NEON SIMD) ---")
         cpp_result = benchmark_cpp(bin_path, args.steps)
         if cpp_result:
             results["cpp_simd"] = cpp_result
             print(f"  TPS: {cpp_result['tps']}")
             print(f"  Peak RSS: {cpp_result['peak_rss_mb']} MB")
             if cpp_result["thermal"].get("available"):
-                print(f"  Temp: {cpp_result['thermal']['avg_c']:.1f} C avg, "
-                      f"{cpp_result['thermal']['max_c']:.1f} C max")
+                print(
+                    f"  Temp: {cpp_result['thermal']['avg_c']:.1f} C avg, "
+                    f"{cpp_result['thermal']['max_c']:.1f} C max"
+                )
 
-        print(f"\n--- C++ Benchmark (without SIMD, scalar) ---")
+        print("\n--- C++ Benchmark (without SIMD, scalar) ---")
         cpp_no_simd = benchmark_cpp_no_simd(bin_path, args.steps)
         if cpp_no_simd:
             results["cpp_scalar"] = cpp_no_simd
@@ -438,12 +475,17 @@ def main():
     print("=" * 60)
 
     target_tps = 10.0
-    for name, key in [("Python", "python"), ("C++ (SIMD)", "cpp_simd"),
-                       ("C++ (scalar)", "cpp_scalar")]:
+    for name, key in [
+        ("Python", "python"),
+        ("C++ (SIMD)", "cpp_simd"),
+        ("C++ (scalar)", "cpp_scalar"),
+    ]:
         if key in results:
             tps = results[key]["tps"]
             status = "PASS" if tps and tps >= target_tps else "BELOW TARGET"
-            print(f"  {name:20s}: {tps:>8} TPS  [{status}]  (target: >{target_tps} TPS)")
+            print(
+                f"  {name:20s}: {tps:>8} TPS  [{status}]  (target: >{target_tps} TPS)"
+            )
 
     # Save results
     output_path = args.output or os.path.join(

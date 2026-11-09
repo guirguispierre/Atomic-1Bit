@@ -2,24 +2,29 @@
 Evaluation runner for Atomic-1Bit models.
 
 Usage:
-    python3 atomic_1bit/evaluation/run_eval.py --model weights/instruct_final.pt --output eval_results.json
+    python3 atomic_1bit/evaluation/run_eval.py --model weights/instruct_final.pt \
+        --output eval_results.json
 """
-import sys
-import os
-import json
+
 import argparse
+import json
+import os
+import sys
 import time
 
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", ".."))
 
-import torch
-import torch.nn.functional as F
+import torch  # noqa: E402
+import torch.nn.functional as F  # noqa: E402
 
-from atomic_1bit.model.transformer import AtomicTransformer, AtomicConfig
-from atomic_1bit.evaluation.perplexity import calculate_perplexity
-from atomic_1bit.evaluation.repetition import calculate_repetition_rate, calculate_repetition_rates
-from atomic_1bit.evaluation.diversity import diversity_metrics, vocabulary_utilization
-from atomic_1bit.evaluation.coherence import sentence_completion_accuracy, top_k_accuracy
+from atomic_1bit.evaluation.coherence import (  # noqa: E402
+    sentence_completion_accuracy,
+    top_k_accuracy,
+)
+from atomic_1bit.evaluation.diversity import diversity_metrics  # noqa: E402
+from atomic_1bit.evaluation.perplexity import calculate_perplexity  # noqa: E402
+from atomic_1bit.evaluation.repetition import calculate_repetition_rates  # noqa: E402
+from atomic_1bit.model.transformer import AtomicConfig, AtomicTransformer  # noqa: E402
 
 
 def generate_text(model, input_ids, max_new_tokens=100, temperature=0.8):
@@ -71,7 +76,9 @@ def run_evaluation(model_path, output_path=None, device=None):
         )
     else:
         # Default flagship config
-        config = AtomicConfig(vocab_size=4096, dim=320, depth=8, heads=5, context_length=256)
+        config = AtomicConfig(
+            vocab_size=4096, dim=320, depth=8, heads=5, context_length=256
+        )
 
     model = AtomicTransformer(config).to(device)
 
@@ -82,13 +89,19 @@ def run_evaluation(model_path, output_path=None, device=None):
     model.eval()
 
     step = checkpoint.get("step", "unknown")
-    print(f"Model loaded (step: {step}, params: {sum(p.numel() for p in model.parameters())/1e6:.2f}M)")
+    params_m = sum(p.numel() for p in model.parameters()) / 1e6
+    print(f"Model loaded (step: {step}, params: {params_m:.2f}M)")
 
     # Load dataset for PPL and coherence evaluation
-    from atomic_1bit.training.train_instruct import EfficientInstructDataset, CONTEXT_LEN
+    from atomic_1bit.training.train_instruct import EfficientInstructDataset
+
     ds = EfficientInstructDataset(context_length=config.context_length)
 
-    results = {"model_path": model_path, "step": step, "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")}
+    results = {
+        "model_path": model_path,
+        "step": step,
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
 
     # 1. Perplexity
     print("\n--- Perplexity ---")
@@ -98,8 +111,12 @@ def run_evaluation(model_path, output_path=None, device=None):
 
     # 2. Coherence
     print("\n--- Coherence ---")
-    acc_top1 = sentence_completion_accuracy(model, ds, config.vocab_size, device, num_samples=100)
-    acc_top5 = top_k_accuracy(model, ds, config.vocab_size, device, k=5, num_samples=100)
+    acc_top1 = sentence_completion_accuracy(
+        model, ds, config.vocab_size, device, num_samples=100
+    )
+    acc_top5 = top_k_accuracy(
+        model, ds, config.vocab_size, device, k=5, num_samples=100
+    )
     results["coherence"] = {
         "top1_accuracy": round(acc_top1, 4),
         "top5_accuracy": round(acc_top5, 4),
@@ -123,6 +140,7 @@ def run_evaluation(model_path, output_path=None, device=None):
         prompt = f"### Instruction: {prompt_text}\n### Response:"
         gpt_ids = ds.enc.encode(prompt)
         from atomic_1bit.training.train_instruct import UNK_ID
+
         ids = [ds.token_map.get(gid, UNK_ID) for gid in gpt_ids]
         input_tensor = torch.tensor([ids], dtype=torch.long)
 
@@ -157,14 +175,18 @@ def run_evaluation(model_path, output_path=None, device=None):
     results["generations"] = generation_results
 
     # 4. Average Metrics
-    avg_rep = sum(g["repetition_rates"]["3"] for g in generation_results) / len(generation_results)
-    avg_diversity = sum(g["diversity"]["bigram_ratio"] for g in generation_results) / len(generation_results)
+    avg_rep = sum(g["repetition_rates"]["3"] for g in generation_results) / len(
+        generation_results
+    )
+    avg_diversity = sum(
+        g["diversity"]["bigram_ratio"] for g in generation_results
+    ) / len(generation_results)
     results["summary"] = {
         "avg_3gram_repetition": round(avg_rep, 4),
         "avg_bigram_diversity": round(avg_diversity, 4),
     }
 
-    print(f"\n--- Summary ---")
+    print("\n--- Summary ---")
     print(f"Perplexity: {results['perplexity']}")
     print(f"Avg 3-gram Repetition: {avg_rep*100:.1f}%")
     print(f"Avg Bigram Diversity: {avg_diversity*100:.1f}%")
@@ -173,7 +195,7 @@ def run_evaluation(model_path, output_path=None, device=None):
 
     # Save
     if output_path:
-        with open(output_path, 'w') as f:
+        with open(output_path, "w") as f:
             json.dump(results, f, indent=2)
         print(f"\nResults saved to {output_path}")
 

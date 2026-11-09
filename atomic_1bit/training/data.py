@@ -1,12 +1,15 @@
+import numpy as np
+import tiktoken
 import torch
 from datasets import load_dataset
-import tiktoken
-import numpy as np
+
 
 class TinyStoriesDataset:
     def __init__(self, split="train", context_length=256, subset_ratio=0.1):
         print(f"Loading TinyStories ({split})...")
-        self.dataset = load_dataset("roneneldan/TinyStories", split=f"{split}[:{int(subset_ratio*100)}%]")
+        self.dataset = load_dataset(
+            "roneneldan/TinyStories", split=f"{split}[:{int(subset_ratio*100)}%]"
+        )
         self.enc = tiktoken.get_encoding("gpt2")
         self.context_length = context_length
         print(f"Loaded {len(self.dataset)} samples.")
@@ -35,6 +38,7 @@ class TinyStoriesDataset:
         x = torch.tensor(batch_input_ids, dtype=torch.long)
         y = torch.tensor(batch_targets, dtype=torch.long)
         return x, y
+
 
 class AlpacaDataset:
     def __init__(self, split="train", context_length=256, vocab_cap=None):
@@ -81,7 +85,7 @@ class AlpacaDataset:
             if len(ids) < self.context_length + 1:
                 ids = ids + [self.enc.eot_token] * (self.context_length + 1 - len(ids))
             elif len(ids) > self.context_length + 1:
-                ids = ids[:self.context_length + 1]
+                ids = ids[: self.context_length + 1]
 
             batch_input_ids.append(ids[:-1])
             batch_targets.append(ids[1:])
@@ -89,6 +93,7 @@ class AlpacaDataset:
         x = torch.tensor(batch_input_ids, dtype=torch.long)
         y = torch.tensor(batch_targets, dtype=torch.long)
         return x, y
+
 
 if __name__ == "__main__":
     ds = AlpacaDataset()

@@ -1,6 +1,7 @@
-import pytest
-import numpy as np
 import os
+
+import numpy as np
+import pytest
 
 
 def _kernel_available():
@@ -11,15 +12,22 @@ def _kernel_available():
     return os.path.exists(lib_path)
 
 
-@pytest.mark.skipif(not _kernel_available(), reason="C++ kernel not built (run 'make' in atomic_1bit/core/)")
+@pytest.mark.skipif(
+    not _kernel_available(),
+    reason="C++ kernel not built (run 'make' in atomic_1bit/core/)",
+)
 class TestKernelParity:
     """Critical parity tests: C++ kernel must produce bit-exact results vs NumPy reference."""
 
     @pytest.fixture(autouse=True)
     def _import_kernel(self):
         import sys
-        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "atomic_1bit", "python"))
+
+        sys.path.insert(
+            0, os.path.join(os.path.dirname(__file__), "..", "atomic_1bit", "python")
+        )
         from wrapper import ternary_matmul
+
         self.ternary_matmul = ternary_matmul
 
     def _verify(self, M, N, K):
@@ -36,8 +44,7 @@ class TestKernelParity:
         C_ref = np.dot(A.astype(np.int32), B.astype(np.int32))
 
         np.testing.assert_array_equal(
-            C_kernel, C_ref,
-            err_msg=f"Parity FAILED for M={M}, N={N}, K={K}"
+            C_kernel, C_ref, err_msg=f"Parity FAILED for M={M}, N={N}, K={K}"
         )
 
     def test_tiny_parity(self):
@@ -80,7 +87,9 @@ class TestKernelParity:
         A = np.random.randint(-127, 128, size=(2, 8), dtype=np.int8)
         B = np.ones((8, 4), dtype=np.int8)
         C = self.ternary_matmul(A, B)
-        expected = A.astype(np.int32).sum(axis=1, keepdims=True) * np.ones((1, 4), dtype=np.int32)
+        expected = A.astype(np.int32).sum(axis=1, keepdims=True) * np.ones(
+            (1, 4), dtype=np.int32
+        )
         np.testing.assert_array_equal(C, expected)
 
     def test_all_neg_ones_weights(self):
@@ -88,7 +97,9 @@ class TestKernelParity:
         A = np.random.randint(-127, 128, size=(2, 8), dtype=np.int8)
         B = -np.ones((8, 4), dtype=np.int8)
         C = self.ternary_matmul(A, B)
-        expected = -A.astype(np.int32).sum(axis=1, keepdims=True) * np.ones((1, 4), dtype=np.int32)
+        expected = -A.astype(np.int32).sum(axis=1, keepdims=True) * np.ones(
+            (1, 4), dtype=np.int32
+        )
         np.testing.assert_array_equal(C, expected)
 
     def test_int8_min_activation(self):

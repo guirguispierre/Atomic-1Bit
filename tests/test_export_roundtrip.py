@@ -25,22 +25,23 @@ This test parses an exported binary using exactly that layout and asserts
 that every field arrives where the C++ loader expects it. If the exporter
 or loader drift again, this test catches the drift.
 """
+
+import math
 import os
 import struct
 import tempfile
-import math
 
 import numpy as np
 import pytest
 import torch
 
-from atomic_1bit.model.transformer import AtomicTransformer, AtomicConfig
+from atomic_1bit.model.transformer import AtomicConfig, AtomicTransformer
 from atomic_1bit.utils.export_to_cpp import (
+    dequantize_embedding_int8,
     export_model,
     pack_ternary,
-    unpack_ternary,
     quantize_embedding_int8,
-    dequantize_embedding_int8,
+    unpack_ternary,
 )
 
 
@@ -83,7 +84,9 @@ def parse_binary(path):
     with open(path, "rb") as f:
         header = f.read(32)
         assert len(header) == 32, "header truncated"
-        magic, version, vocab, dim, depth, heads, ctx, has_gist = struct.unpack("iiiiiiii", header)
+        magic, version, vocab, dim, depth, heads, ctx, has_gist = struct.unpack(
+            "iiiiiiii", header
+        )
         assert 2 <= version <= 3, f"unexpected format version {version}"
         out["magic"] = magic
         out["version"] = version
@@ -114,9 +117,9 @@ def parse_binary(path):
             for name in ("q", "k", "v", "o"):
                 (scale,) = struct.unpack("f", f.read(4))
                 weights = _read_packed(f, dim * dim)
-                assert len(weights) == _packed_bytes(dim * dim), (
-                    f"layer {i} {name}_w truncated"
-                )
+                assert len(weights) == _packed_bytes(
+                    dim * dim
+                ), f"layer {i} {name}_w truncated"
                 layer[f"{name}_scale"] = scale
                 layer[f"{name}_w_len"] = len(weights)
 
@@ -124,17 +127,17 @@ def parse_binary(path):
 
             (fc1_scale,) = struct.unpack("f", f.read(4))
             fc1_w = _read_packed(f, dim * 4 * dim)
-            assert len(fc1_w) == _packed_bytes(dim * 4 * dim), (
-                f"layer {i} fc1_w truncated"
-            )
+            assert len(fc1_w) == _packed_bytes(
+                dim * 4 * dim
+            ), f"layer {i} fc1_w truncated"
             layer["fc1_scale"] = fc1_scale
             layer["fc1_w_len"] = len(fc1_w)
 
             (fc2_scale,) = struct.unpack("f", f.read(4))
             fc2_w = _read_packed(f, 4 * dim * dim)
-            assert len(fc2_w) == _packed_bytes(4 * dim * dim), (
-                f"layer {i} fc2_w truncated"
-            )
+            assert len(fc2_w) == _packed_bytes(
+                4 * dim * dim
+            ), f"layer {i} fc2_w truncated"
             layer["fc2_scale"] = fc2_scale
             layer["fc2_w_len"] = len(fc2_w)
 
@@ -202,12 +205,21 @@ def test_per_tensor_scales_are_finite_and_positive(tmp_bin):
 
     suspicious = {0x41544F4D, 2}
     for i, layer in enumerate(parsed["layers"]):
-        for key in ("q_scale", "k_scale", "v_scale", "o_scale", "fc1_scale", "fc2_scale"):
+        for key in (
+            "q_scale",
+            "k_scale",
+            "v_scale",
+            "o_scale",
+            "fc1_scale",
+            "fc2_scale",
+        ):
             s = layer[key]
             assert math.isfinite(s), f"layer {i} {key} not finite: {s}"
             assert s > 0, f"layer {i} {key} non-positive: {s}"
             # If we accidentally read magic-as-scale, this catches it.
-            assert int(s) not in suspicious, f"layer {i} {key} looks like a header field"
+            assert (
+                int(s) not in suspicious
+            ), f"layer {i} {key} looks like a header field"
 
     assert math.isfinite(parsed["head_scale"])
     assert parsed["head_scale"] > 0
@@ -236,11 +248,11 @@ def test_byte_count_matches_expected(tmp_bin, format_version):
         expected += (v * d + ctx * d) * 4
     # Per layer
     per_layer = (
-        d * 4                                      # ln1
-        + 4 * (4 + _packed_bytes(d * d))           # q/k/v/o: scale + weights
-        + d * 4                                    # ln2
-        + (4 + _packed_bytes(d * hidden))          # fc1
-        + (4 + _packed_bytes(hidden * d))          # fc2
+        d * 4  # ln1
+        + 4 * (4 + _packed_bytes(d * d))  # q/k/v/o: scale + weights
+        + d * 4  # ln2
+        + (4 + _packed_bytes(d * hidden))  # fc1
+        + (4 + _packed_bytes(hidden * d))  # fc2
     )
     expected += L * per_layer
     # ln_f + head
@@ -310,7 +322,8 @@ class TestEmbeddingQuantization:
                 parsed[f"{name}_scales"], scales, err_msg=f"{name} scales"
             )
             np.testing.assert_array_equal(
-                parsed[f"{name}_codes"], codes.reshape(-1),
+                parsed[f"{name}_codes"],
+                codes.reshape(-1),
                 err_msg=f"{name} codes",
             )
 
@@ -328,7 +341,8 @@ class TestEmbeddingQuantization:
             scales, codes = quantize_embedding_int8(weight)
             expected = dequantize_embedding_int8(scales, codes).reshape(-1)
             np.testing.assert_array_equal(
-                np.asarray(parsed[name], dtype=np.float32), expected,
+                np.asarray(parsed[name], dtype=np.float32),
+                expected,
                 err_msg=f"{name} dequantized",
             )
 
@@ -361,9 +375,7 @@ class TestEmbeddingQuantization:
         export_model(model, tmp_bin)
         parsed = parse_binary(tmp_bin)
 
-        codes = parsed["token_emb_codes"].reshape(
-            parsed["vocab"], parsed["dim"]
-        )
+        codes = parsed["token_emb_codes"].reshape(parsed["vocab"], parsed["dim"])
         assert codes.min() >= -127 and codes.max() <= 127
         assert (np.abs(codes).max(axis=1) == 127).all()
 

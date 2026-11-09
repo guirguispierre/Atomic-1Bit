@@ -150,6 +150,34 @@ struct AtomicModel {
   vector<float> gist_vector;
 };
 
+// Per-layer K/V rows laid out [layer][pos][dim]. len counts valid positions;
+// -1 means empty. Fill it with forward() on the prompt, then call
+// forward_one() per generated token instead of re-running the full prefix.
+// When the context window slides, learned positions are rebased and the rows
+// go stale: set len = -1 and refill via forward().
+struct KVCache {
+  vector<float> K;
+  vector<float> V;
+  int len = -1;
+  int depth = 0, max_seq_len = 0, dim = 0;
+
+  void init(int d, int m, int dm) {
+    depth = d;
+    max_seq_len = m;
+    dim = dm;
+    K.assign((size_t)d * m * dm, 0.0f);
+    V.assign((size_t)d * m * dm, 0.0f);
+    len = -1;
+  }
+
+  float *k_row(int layer, int pos) {
+    return &K[((size_t)layer * max_seq_len + pos) * dim];
+  }
+  float *v_row(int layer, int pos) {
+    return &V[((size_t)layer * max_seq_len + pos) * dim];
+  }
+};
+
 inline bool read_scale(ifstream &f, float &out) {
   return (bool)f.read((char *)&out, sizeof(float));
 }
@@ -270,8 +298,12 @@ inline bool load_model(const string &filename, AtomicModel &model) {
   return true;
 }
 
+// Full-prefix forward. When cache is non-null, its rows are refilled as the
+// pass runs and cache->len ends at seq_len, so generation can continue with
+// forward_one(). Positions are absolute stream indices: under a gist, token i
+// sits at row i+1 and sees pos_emb[i+1], matching the runner and PyTorch.
 inline void forward(AtomicModel &model, const vector<int> &tokens,
-                    vector<float> &logits) {
+                    vector<float> &logits, KVCache *cache = nullptr) {
   int dim = model.config.dim;
   int heads = model.config.heads;
   int head_dim = dim / heads;
@@ -279,8 +311,13 @@ inline void forward(AtomicModel &model, const vector<int> &tokens,
   int input_len = (int)tokens.size();
   int seq_len = input_len + (model.config.has_gist ? 1 : 0);
 
-  if (seq_len > model.config.max_seq_len)
+  if (seq_len <= 0 || seq_len > model.config.max_seq_len)
     return;
+
+  int depth = (int)model.layers.size();
+  if (cache && (cache->depth != depth || cache->dim != dim ||
+                cache->max_seq_len != model.config.max_seq_len))
+    cache->init(depth, model.config.max_seq_len, dim);
 
   vector<float> X(seq_len * dim);
 
@@ -298,7 +335,7 @@ inline void forward(AtomicModel &model, const vector<int> &tokens,
     }
     float *x_ptr = &X[(t_offset + i) * dim];
     float *tok_ptr = &model.token_emb.data()[token_id * dim];
-    float *pos_ptr = &model.pos_emb.data()[i * dim];
+    float *pos_ptr = &model.pos_emb.data()[(t_offset + i) * dim];
 
     for (int d = 0; d < dim; ++d) {
       x_ptr[d] = tok_ptr[d] + pos_ptr[d];
@@ -307,6 +344,7 @@ inline void forward(AtomicModel &model, const vector<int> &tokens,
 
   vector<float> X_norm(seq_len * dim);
 
+  int l_idx = 0;
   for (auto &layer : model.layers) {
     for (int t = 0; t < seq_len; ++t) {
       vector<float> xt(dim);
@@ -327,6 +365,10 @@ inline void forward(AtomicModel &model, const vector<int> &tokens,
       memcpy(&Q[t * dim], q.data(), dim * sizeof(float));
       memcpy(&K[t * dim], k.data(), dim * sizeof(float));
       memcpy(&V[t * dim], v.data(), dim * sizeof(float));
+      if (cache) {
+        memcpy(cache->k_row(l_idx, t), k.data(), dim * sizeof(float));
+        memcpy(cache->v_row(l_idx, t), v.data(), dim * sizeof(float));
+      }
     }
 
     vector<float> AttnOut(seq_len * dim, 0.0f);
@@ -380,12 +422,107 @@ inline void forward(AtomicModel &model, const vector<int> &tokens,
       for (int i = 0; i < dim; ++i)
         X[t * dim + i] += mlp_out[i];
     }
+    ++l_idx;
   }
 
   vector<float> xt(dim), xn(dim);
   memcpy(xt.data(), &X[(seq_len - 1) * dim], dim * sizeof(float));
   rms_norm(xt, model.ln_f, xn, dim);
   bit_linear(xn, model.head_w, model.head_s, logits);
+
+  if (cache)
+    cache->len = seq_len;
+}
+
+// Decode exactly one token. The cache must already hold positions 0..len-1
+// (fill it with forward()). Produces bit-identical logits to running forward()
+// on the whole context: same operations in the same order for the new row.
+// Returns false when the window is full or the cache is stale — slide the
+// token list, set cache.len = -1, and refill with forward().
+inline bool forward_one(AtomicModel &model, int token, vector<float> &logits,
+                        KVCache &cache) {
+  int dim = model.config.dim;
+  int heads = model.config.heads;
+  int head_dim = dim / heads;
+  int depth = (int)model.layers.size();
+
+  if (cache.depth != depth || cache.dim != dim ||
+      cache.max_seq_len != model.config.max_seq_len || cache.len < 0 ||
+      cache.len >= model.config.max_seq_len)
+    return false;
+  if (token < 0 || token >= model.config.vocab_size)
+    return false;
+
+  int pos = cache.len;
+
+  vector<float> x(dim);
+  const float *tok_ptr = &model.token_emb.data()[token * dim];
+  const float *pos_ptr = &model.pos_emb.data()[pos * dim];
+  for (int d = 0; d < dim; ++d)
+    x[d] = tok_ptr[d] + pos_ptr[d];
+
+  int l_idx = 0;
+  for (auto &layer : model.layers) {
+    vector<float> xn(dim);
+    rms_norm(x, layer.ln1, xn, dim);
+
+    vector<float> q(dim), k(dim), v(dim);
+    bit_linear(xn, layer.q_w, layer.q_s, q);
+    bit_linear(xn, layer.k_w, layer.k_s, k);
+    bit_linear(xn, layer.v_w, layer.v_s, v);
+    memcpy(cache.k_row(l_idx, pos), k.data(), dim * sizeof(float));
+    memcpy(cache.v_row(l_idx, pos), v.data(), dim * sizeof(float));
+
+    vector<float> attn(dim, 0.0f);
+    for (int h = 0; h < heads; ++h) {
+      const float *q_ptr = &q[h * head_dim];
+      vector<float> scores(pos + 1);
+      for (int src = 0; src <= pos; ++src) {
+        const float *k_ptr = cache.k_row(l_idx, src) + h * head_dim;
+        float dp = 0.0f;
+        for (int d = 0; d < head_dim; ++d)
+          dp += q_ptr[d] * k_ptr[d];
+        scores[src] = dp / sqrt((float)head_dim);
+      }
+      softmax(scores);
+
+      float *out_ptr = &attn[h * head_dim];
+      for (int src = 0; src <= pos; ++src) {
+        float wgt = scores[src];
+        const float *v_ptr = cache.v_row(l_idx, src) + h * head_dim;
+        for (int d = 0; d < head_dim; ++d)
+          out_ptr[d] += wgt * v_ptr[d];
+      }
+    }
+
+    vector<float> o_vec(dim);
+    bit_linear(attn, layer.o_w, layer.o_s, o_vec);
+    for (int i = 0; i < dim; ++i)
+      x[i] += o_vec[i];
+
+    vector<float> xn2(dim);
+    rms_norm(x, layer.ln2, xn2, dim);
+
+    int hidden = 4 * dim;
+    vector<float> h_act(hidden);
+    bit_linear(xn2, layer.fc1_w, layer.fc1_s, h_act);
+    for (int i = 0; i < hidden; ++i)
+      h_act[i] = gelu(h_act[i]);
+
+    vector<float> mlp_out(dim);
+    bit_linear(h_act, layer.fc2_w, layer.fc2_s, mlp_out);
+    for (int i = 0; i < dim; ++i)
+      x[i] += mlp_out[i];
+
+    ++l_idx;
+  }
+
+  vector<float> xn(dim);
+  rms_norm(x, model.ln_f, xn, dim);
+  bit_linear(xn, model.head_w, model.head_s, logits);
+
+  ++cache.len;
+  return true;
 }
 
 #endif

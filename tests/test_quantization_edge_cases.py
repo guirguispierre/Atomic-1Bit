@@ -5,20 +5,24 @@ Exercises activation_quant, weight_quant, and BitLinear.forward with
 pathological inputs: zeros, huge magnitudes, tiny magnitudes, NaNs, Infs,
 single-element tensors, negative-only, and uniform tensors.
 """
-import sys
-import os
 
-import pytest
+import os
+import sys
+
 import torch
-import torch.nn as nn
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from atomic_1bit.nn.layers import BitLinear, activation_quant, weight_quant
+from atomic_1bit.nn.layers import (  # noqa: E402
+    BitLinear,
+    activation_quant,
+    weight_quant,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_layer(in_f=8, out_f=16):
     """Return a BitLinear layer in eval mode with fixed seed weights."""
@@ -32,14 +36,15 @@ def _make_layer(in_f=8, out_f=16):
 # activation_quant edge cases
 # ---------------------------------------------------------------------------
 
+
 class TestActivationQuantEdgeCases:
     def test_all_zero_input(self):
         """All-zero activation: quantized output must be all-zero."""
         x = torch.zeros(1, 1, 16)
         y, scale = activation_quant(x)
-        assert torch.allclose(y, torch.zeros_like(y)), (
-            "Expected all-zero output for all-zero input"
-        )
+        assert torch.allclose(
+            y, torch.zeros_like(y)
+        ), "Expected all-zero output for all-zero input"
 
     def test_all_zero_scale_clamped(self):
         """Scale for all-zero input must be > 0 (clamped, not division-by-zero)."""
@@ -68,9 +73,9 @@ class TestActivationQuantEdgeCases:
         y, scale = activation_quant(x)
         # NaN presence in input should produce at least one NaN in output
         # (no silent replacement expected from the current implementation)
-        assert torch.isnan(y).any() or torch.isnan(scale).any(), (
-            "Expected NaN to propagate through activation_quant"
-        )
+        assert (
+            torch.isnan(y).any() or torch.isnan(scale).any()
+        ), "Expected NaN to propagate through activation_quant"
 
     def test_mixed_inf_values(self):
         """Inf in input should not produce finite scale (absmax is Inf)."""
@@ -93,16 +98,18 @@ class TestActivationQuantEdgeCases:
         """All-negative activations must produce non-positive quantized output."""
         x = torch.full((1, 1, 16), -5.0)
         y, scale = activation_quant(x)
-        assert y.max() <= 0.0, "Expected non-positive quantized output for all-negative input"
+        assert (
+            y.max() <= 0.0
+        ), "Expected non-positive quantized output for all-negative input"
 
     def test_uniform_value_input(self):
         """Uniform (all same non-zero value) input: quantized output should be uniform."""
         x = torch.full((2, 4, 8), 2.5)
         y, scale = activation_quant(x)
         # All values are equal so all quantized values should also be equal within a row
-        assert y.std() < 1e-3, (
-            f"Expected near-uniform quantized output for uniform input, got std={y.std()}"
-        )
+        assert (
+            y.std() < 1e-3
+        ), f"Expected near-uniform quantized output for uniform input, got std={y.std()}"
 
     def test_output_range_general(self):
         """Quantized activations must always lie in [-127, 127]."""
@@ -117,14 +124,15 @@ class TestActivationQuantEdgeCases:
 # weight_quant edge cases
 # ---------------------------------------------------------------------------
 
+
 class TestWeightQuantEdgeCases:
     def test_all_zero_weights(self):
         """All-zero weights: quantized output must be all-zero."""
         w = torch.zeros(16, 8)
         y, scale = weight_quant(w)
-        assert torch.allclose(y, torch.zeros_like(y)), (
-            "Expected all-zero quantized weights for all-zero input"
-        )
+        assert torch.allclose(
+            y, torch.zeros_like(y)
+        ), "Expected all-zero quantized weights for all-zero input"
 
     def test_all_zero_scale_clamped(self):
         """Scale for all-zero weights must be > 0 (mean clamp prevents divide-by-zero)."""
@@ -180,6 +188,7 @@ class TestWeightQuantEdgeCases:
 # BitLinear edge cases
 # ---------------------------------------------------------------------------
 
+
 class TestBitLinearEdgeCases:
     def test_all_zero_input(self):
         """All-zero input: output should be all-zero (no activation signal)."""
@@ -188,9 +197,9 @@ class TestBitLinearEdgeCases:
         with torch.no_grad():
             y = layer(x)
         assert y.shape == (1, 1, 16)
-        assert torch.allclose(y, torch.zeros_like(y), atol=1e-5), (
-            "Expected near-zero output for all-zero input"
-        )
+        assert torch.allclose(
+            y, torch.zeros_like(y), atol=1e-5
+        ), "Expected near-zero output for all-zero input"
 
     def test_very_large_input(self):
         """Very large input (1e6): output must be finite."""
@@ -215,9 +224,7 @@ class TestBitLinearEdgeCases:
         x[0, 0, 0] = float("nan")
         with torch.no_grad():
             y = layer(x)
-        assert torch.isnan(y).any(), (
-            "Expected NaN to propagate through BitLinear"
-        )
+        assert torch.isnan(y).any(), "Expected NaN to propagate through BitLinear"
 
     def test_inf_input(self):
         """Inf in input: layer must not raise an exception."""
@@ -281,6 +288,4 @@ class TestBitLinearEdgeCases:
             x = torch.randn(batch, 5, 8)
             with torch.no_grad():
                 y = layer(x)
-            assert y.shape == (batch, 5, 16), (
-                f"Shape mismatch for batch_size={batch}"
-            )
+            assert y.shape == (batch, 5, 16), f"Shape mismatch for batch_size={batch}"

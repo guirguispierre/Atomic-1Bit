@@ -424,9 +424,9 @@ The runner outputs token IDs separated by spaces, followed by tokens-per-second 
 - Key limitations to address before deploying to a microcontroller:
   1. `std::vector` is used extensively for all intermediate buffers. Replace with static arrays or a memory arena. The `Workspace` struct in `atomic_runner.cpp` shows the pattern for pre-allocation.
   2. Heap allocation in `forward` (one `std::vector` allocation per function call) is unsuitable for RTOS environments. Pre-allocate all buffers at startup.
-  3. The code comments note that ternary weights should be packed to 2 bits per weight for memory-constrained devices. The current format uses 1 byte per weight value.
+  3. Ternary weights in the file are already packed 2 bits per weight (v2+ format) and embeddings are int8 codes + float32 row scales (v3); loaders unpack to int8/float32 in RAM at load. The RAM figure below is the *in-memory* footprint, not the flash footprint.
 - Recommended minimum RAM: For the TinyStories model (dim=256, depth=6):
-  - Model weights: approximately 256 × 256 × 4 (attn) + 256 × 1024 × 2 (MLP) × 6 layers + embeddings ≈ ~5 MB for weights alone.
+  - Model weights: approximately 256 × 256 × 4 (attn) + 256 × 1024 × 2 (MLP) × 6 layers + embeddings ≈ ~5 MB unpacked in RAM (the v3 file itself is ~2.6 MB).
   - Activations and intermediate buffers: proportional to `max_seq_len × dim`. For seq_len=128, dim=256: 128 × 256 × 4 bytes × ~8 buffers ≈ ~1 MB.
   - Total: target at least 8 MB RAM for the small model.
 

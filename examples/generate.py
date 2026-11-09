@@ -9,15 +9,16 @@ Usage:
     python3 examples/generate.py --checkpoint weights/stories_final.pt --temp 0.7
 """
 
-import sys
-import os
 import argparse
+import os
+import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import torch
-import tiktoken
-from atomic_1bit.model.transformer import AtomicTransformer, AtomicConfig
+import tiktoken  # noqa: E402
+import torch  # noqa: E402
+
+from atomic_1bit.model.transformer import AtomicConfig, AtomicTransformer  # noqa: E402
 
 
 def main():

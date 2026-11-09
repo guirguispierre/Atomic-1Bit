@@ -1,14 +1,14 @@
-import sys
 import os
+import sys
+
 import pytest
 import torch
 
 # Add project root to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from atomic_1bit.model.transformer import AtomicTransformer, AtomicConfig
-from atomic_1bit.model.gist import GistEncoder, GistConfig
-from atomic_1bit.nn.layers import BitLinear
+from atomic_1bit.model.gist import GistConfig  # noqa: E402
+from atomic_1bit.model.transformer import AtomicConfig, AtomicTransformer  # noqa: E402
 
 
 @pytest.fixture

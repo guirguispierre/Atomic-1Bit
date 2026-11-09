@@ -27,6 +27,10 @@ __pycache__/
 venv/
 env/
 
+# WASM build artifacts
+embedded/platforms/wasm/atomic.js
+embedded/platforms/wasm/atomic.wasm
+
 # OS
 .DS_Store
 .DS_Store?

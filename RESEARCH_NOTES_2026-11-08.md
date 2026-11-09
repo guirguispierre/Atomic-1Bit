@@ -48,14 +48,56 @@ torch 2.8.0, Python 3.9 venv. This run closes out the findings from
   pre/post change (greedy, sampled, top-p/top-k, multi-token prompts,
   gist model, context-overflow rebuild).
 - ESP32 firmware build (xtensa-esp-elf-g++ 14.2): SUCCESS, v3 loader
-  included. WASM port compiles to object with g++ -std=c++17 (emcc not
-  installed here).
+  included.
+- WASM verified end to end: built with Emscripten (emsdk 4.x) and driven
+  from Node against the exported model -- the greedy 30-token stream is
+  byte-identical to the native runner's.
+
+## Round 2 findings -> fixes
+
+- **Gist position parity bug (latent, both engines)**: PyTorch indexed
+  prompt tokens from 0 with a gist occupying slot 0 while its decode
+  path used stream indices; `atomic_lib.h` copied the same mistake.
+  Prefill and decode disagreed by one position on every prompt token
+  under a gist. Both now use stream indices; a v2-export parity test
+  holds the two engines to <1e-3.
+- **Gist models dead-generated past context**: the runner's slide cap
+  was `max_seq_len` even with `has_gist`, so a full window skipped the
+  forward pass and sampled uniformly forever. Cap is now `max_seq - 1`
+  under a gist.
+- **atomic_lib.h now has the KV cache** (`KVCache` + `forward_one`):
+  bit-identical to full `forward()`, proven by a compiled harness that
+  runs both paths per step over plain and gist exports.
+- **`--vocab` text output** in the runner (`tools/make_vocab.py` makes
+  the hex-per-line file; `checkpoints/tiny_stories.vocab` ships) and
+  malformed `.vocab` files now fail loudly.
+- **27 runner-CLI tests** added (`tests/test_runner_cli.py`), locking
+  determinism, context-crossing slides, `--parity`, `--vocab`, arg
+  validation, and gist exports.
+- **Lint**: the Python tree was carrying ~700 flake8 violations; it is
+  now clean under the exact CI command (black + isort + noqa markers
+  only on `sys.path`-dependent imports). 217 tests pass.
+- **`--threads` worker pool**: chunked column claiming keeps P and E
+  cores busy; output is byte-identical to serial (int32 accumulators
+  partition exactly). Measured on the merged build: 15.4k TPS at
+  `--threads 4` vs 14.2k serial on the fixture (memory-bound), and the
+  agent measured ~5.3-5.6k vs ~3.3k on the larger Quick Start config.
+- **`--gist` parity coverage** in `tools/parity_check.py`, plus a WARN
+  band (1-4x tol) so quantization boundary excursions report without
+  failing the engine.
+- **Cardputer**: same stream-index position fix applied (the ESP32
+  loader is a proof-of-concept stub with no forward pass to fix);
+  `pio run` now compiles the firmware in CI.
 
 ## Caveats kept honest
 
-- KV cache falls back to full-prefix recompute once the sequence exceeds
-  context_length (learned absolute positions) -- ~85 TPS post-overflow,
-  still 1.8x the old path at that point.
+- KV cache still rebuilds once the window exceeds context_length
+  (learned absolute positions rebase), but the slide now erases a
+  quarter-window chunk: ~1 rebuild per `ctx/4` tokens instead of every
+  token. Measured on the trained 1.32M model (ctx 64, dim 128):
+  14,174 TPS for 60 in-context steps vs 5,628 TPS for 200 steps
+  (136 of them post-window). The earlier pin-at-cap slide rebuilt the
+  prefix on every post-window token.
 - The Metal path needs `default.metallib` next to the dylib; without it
   (or without a Metal device) it now warns once and runs a scalar CPU
   fallback rather than exiting.

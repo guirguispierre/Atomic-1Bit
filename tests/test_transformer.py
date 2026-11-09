@@ -2,11 +2,11 @@ import pytest
 import torch
 
 from atomic_1bit.model.transformer import (
-    AtomicTransformer,
+    AtomicBlock,
     AtomicConfig,
+    AtomicTransformer,
     BitAttention,
     BitFeedForward,
-    AtomicBlock,
 )
 
 
@@ -20,7 +20,9 @@ class TestAtomicConfig:
         assert config.context_length == 1024
 
     def test_custom_config(self):
-        config = AtomicConfig(vocab_size=4096, dim=320, depth=8, heads=5, context_length=256)
+        config = AtomicConfig(
+            vocab_size=4096, dim=320, depth=8, heads=5, context_length=256
+        )
         assert config.vocab_size == 4096
         assert config.dim == 320
 
@@ -113,7 +115,9 @@ class TestAtomicTransformer:
 
     def test_context_length_limit(self, tiny_model, tiny_config):
         """Should raise error if input exceeds context length."""
-        x = torch.randint(0, tiny_config.vocab_size, (1, tiny_config.context_length + 1))
+        x = torch.randint(
+            0, tiny_config.vocab_size, (1, tiny_config.context_length + 1)
+        )
         with pytest.raises(AssertionError):
             tiny_model(x)
 
@@ -126,7 +130,9 @@ class TestAtomicTransformer:
 
     def test_with_gist_token(self, tiny_model, tiny_config):
         """Forward pass with gist token should increase sequence length by 1."""
-        x = torch.randint(0, tiny_config.vocab_size, (1, tiny_config.context_length - 1))
+        x = torch.randint(
+            0, tiny_config.vocab_size, (1, tiny_config.context_length - 1)
+        )
         gist = torch.randn(1, tiny_config.dim)
         with torch.no_grad():
             logits = tiny_model(x, gist_token=gist)
@@ -161,13 +167,19 @@ class TestAtomicTransformer:
     def test_generate_without_cache(self, tiny_model, tiny_config):
         """Non-cached generation should produce valid tokens."""
         x = torch.randint(0, tiny_config.vocab_size, (1, 2))
-        result = tiny_model.generate(x, max_new_tokens=5, temperature=0, use_cache=False)
+        result = tiny_model.generate(
+            x, max_new_tokens=5, temperature=0, use_cache=False
+        )
         assert result.shape[1] == 7
         assert (result >= 0).all() and (result < tiny_config.vocab_size).all()
 
     def test_cache_matches_no_cache(self, tiny_model, tiny_config):
         """Cached and non-cached generation should produce identical greedy outputs."""
         x = torch.randint(0, tiny_config.vocab_size, (1, 2))
-        cached = tiny_model.generate(x.clone(), max_new_tokens=5, temperature=0, use_cache=True)
-        no_cache = tiny_model.generate(x.clone(), max_new_tokens=5, temperature=0, use_cache=False)
+        cached = tiny_model.generate(
+            x.clone(), max_new_tokens=5, temperature=0, use_cache=True
+        )
+        no_cache = tiny_model.generate(
+            x.clone(), max_new_tokens=5, temperature=0, use_cache=False
+        )
         assert torch.equal(cached, no_cache)

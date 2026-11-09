@@ -1,6 +1,3 @@
-from collections import Counter
-
-
 def unique_ngram_ratio(text, n=1):
     """
     Calculate the ratio of unique n-grams to total n-grams.
@@ -16,7 +13,7 @@ def unique_ngram_ratio(text, n=1):
     if len(tokens) < n:
         return 1.0
 
-    ngrams = [tuple(tokens[i:i+n]) for i in range(len(tokens) - n + 1)]
+    ngrams = [tuple(tokens[i : i + n]) for i in range(len(tokens) - n + 1)]
     if len(ngrams) == 0:
         return 1.0
 

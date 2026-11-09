@@ -39,8 +39,14 @@ I32 = ctypes.POINTER(ctypes.c_int32)
 
 def load_kernel(path):
     lib = ctypes.CDLL(path)
-    lib.ternary_matmul.argtypes = [I8, I8, I32,
-                                 ctypes.c_int, ctypes.c_int, ctypes.c_int]
+    lib.ternary_matmul.argtypes = [
+        I8,
+        I8,
+        I32,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+    ]
     lib.ternary_matmul.restype = None
     return lib
 
@@ -49,8 +55,7 @@ def make_inputs(M, N, K, seed=0):
     rng = np.random.default_rng(seed)
     # Full int8 activation range, ternary weights {-1, 0, 1}.
     A = rng.integers(-128, 128, size=(M, K), dtype=np.int8)
-    B_t = np.ascontiguousarray(
-        rng.integers(-1, 2, size=(N, K), dtype=np.int8))
+    B_t = np.ascontiguousarray(rng.integers(-1, 2, size=(N, K), dtype=np.int8))
     C = np.zeros((M, N), dtype=np.int32)
     return (
         A.ctypes.data_as(I8),
@@ -67,8 +72,11 @@ def sanity_check(lib, lib_name):
     lib.ternary_matmul(A_ptr, B_ptr, C_ptr, 2, 40, 40)
     ref = keep[0].astype(np.int32) @ keep[1].astype(np.int32).T
     if not np.array_equal(C, ref):
-        print(f"WARNING: {lib_name} failed parity check "
-              f"(max |diff| = {np.abs(C - ref).max()})", file=sys.stderr)
+        print(
+            f"WARNING: {lib_name} failed parity check "
+            f"(max |diff| = {np.abs(C - ref).max()})",
+            file=sys.stderr,
+        )
         return False
     return True
 
@@ -104,14 +112,28 @@ def parse_shape(s):
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--lib", action="append", default=[],
-                    help="path to libatomic.so (repeat to compare builds)")
-    ap.add_argument("--shape", action="append", type=parse_shape, default=[],
-                    help="MxNxK (repeatable); overrides the default list")
-    ap.add_argument("--budget", type=float, default=0.25,
-                    help="seconds per timed run (default 0.25)")
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument(
+        "--lib",
+        action="append",
+        default=[],
+        help="path to libatomic.so (repeat to compare builds)",
+    )
+    ap.add_argument(
+        "--shape",
+        action="append",
+        type=parse_shape,
+        default=[],
+        help="MxNxK (repeatable); overrides the default list",
+    )
+    ap.add_argument(
+        "--budget",
+        type=float,
+        default=0.25,
+        help="seconds per timed run (default 0.25)",
+    )
     args = ap.parse_args()
 
     libs = args.lib or [DEFAULT_LIB]
@@ -130,7 +152,7 @@ def main():
 
     headers = [f"{n} ms" for n in names] + [f"vs {names[0]}"] * (len(names) - 1)
     print(f"{'shape (M,N,K)':<20}" + "".join(f"{h:>16}" for h in headers))
-    for (M, N, K) in shapes:
+    for M, N, K in shapes:
         times = [time_shape(lib, M, N, K, args.budget) for lib in kernels]
         row = f"({M}, {N}, {K})".ljust(20)
         row += "".join(f"{t * 1e3:>16.3f}" for t in times)
@@ -141,8 +163,10 @@ def main():
     # Aggregate throughput for the first shape set is per-shape; report a
     # GMAC/s (add/sub "MACs") line per lib for the largest shape instead.
     M, N, K = shapes[0]
-    print("\nThroughput on first shape "
-          f"(MAC = one ternary add/sub term, {M*N*K} MACs/call):")
+    print(
+        "\nThroughput on first shape "
+        f"(MAC = one ternary add/sub term, {M*N*K} MACs/call):"
+    )
     for name, lib in zip(names, kernels):
         t = time_shape(lib, M, N, K, args.budget)
         print(f"  {name:<24}{M * N * K / t / 1e9:>8.2f} GMAC/s")

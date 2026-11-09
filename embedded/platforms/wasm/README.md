@@ -23,6 +23,30 @@ make
 #   atomic.wasm  - WebAssembly binary
 ```
 
+## Smoke-test in Node (no browser)
+
+```bash
+node - <<'EOF'
+const fs = require('fs');
+const atomic = require('./atomic.js');
+atomic.onRuntimeInitialized = () => {
+  const bin = fs.readFileSync('atomic_model.bin');
+  const ptr = atomic._malloc(bin.length);
+  new Uint8Array(atomic.HEAPF32.buffer).set(bin, ptr);
+  console.log('init:', atomic._init_model(ptr, bin.length));
+  let tok = 1;
+  for (let i = 0; i < 30; i++) {
+    tok = atomic._generate_token(tok);
+    process.stdout.write(tok + ' ');
+  }
+};
+EOF
+```
+
+Verified 2026-11-08 on arm64 macOS (emsdk 7.0.0): the module loads a v3
+`.bin` and greedy-decodes a token sequence identical to
+`embedded/atomic_runner.cpp --temp 0`.
+
 ## Run
 
 ```bash

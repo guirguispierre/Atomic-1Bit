@@ -1,13 +1,15 @@
+import math
+import os
+import sys
+from dataclasses import dataclass
+
 import torch
 import torch.nn as nn
-import math
-from dataclasses import dataclass
-import sys
-import os
 
 # Import BitLinear
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", ".."))
-from atomic_1bit.nn.layers import BitLinear
+from atomic_1bit.nn.layers import BitLinear  # noqa: E402
+
 
 @dataclass
 class AtomicConfig:
@@ -16,6 +18,7 @@ class AtomicConfig:
     depth: int = 8
     heads: int = 8
     context_length: int = 1024
+
 
 class BitAttention(nn.Module):
     def __init__(self, config: AtomicConfig):
@@ -70,7 +73,7 @@ class BitAttention(nn.Module):
         # Each new query at position i can attend to all positions up to T_prev + i
         mask = torch.ones(T, T_total, device=x.device, dtype=torch.bool)
         mask = torch.triu(mask, diagonal=T_total - T + 1)
-        att = att.masked_fill(mask, float('-inf'))
+        att = att.masked_fill(mask, float("-inf"))
 
         att = torch.nn.functional.softmax(att, dim=-1)
 
@@ -82,6 +85,7 @@ class BitAttention(nn.Module):
 
         # Output Projection (BitLinear)
         return self.o_proj(y), new_kv_cache
+
 
 class BitFeedForward(nn.Module):
     def __init__(self, config: AtomicConfig):
@@ -97,6 +101,7 @@ class BitFeedForward(nn.Module):
     def forward(self, x):
         return self.fc2(self.act(self.fc1(x)))
 
+
 class AtomicBlock(nn.Module):
     def __init__(self, config: AtomicConfig):
         super().__init__()
@@ -110,6 +115,7 @@ class AtomicBlock(nn.Module):
         x = x + attn_out
         x = x + self.mlp(self.ln2(x))
         return x, new_kv_cache
+
 
 class AtomicTransformer(nn.Module):
     def __init__(self, config: AtomicConfig):
@@ -150,11 +156,20 @@ class AtomicTransformer(nn.Module):
             pos_offset = 0
 
         # Check sequence length limit
-        seq_len = T + pos_offset + (1 if gist_token is not None and pos_offset == 0 else 0)
+        gist_shift = 1 if gist_token is not None and pos_offset == 0 else 0
+        seq_len = T + pos_offset + gist_shift
         assert seq_len <= self.config.context_length, "Sequence too long"
 
-        # Embeddings
-        pos = torch.arange(pos_offset, pos_offset + T, dtype=torch.long, device=idx.device)
+        # Embeddings. Positions are absolute stream indices: a prepended gist
+        # occupies slot 0, so real tokens start at pos_offset + gist_shift.
+        # This matches the C++ runner's pos = K-cache-row convention both for
+        # prefill (tokens at 1..T under a gist) and decode (pos = cache len).
+        pos = torch.arange(
+            pos_offset + gist_shift,
+            pos_offset + gist_shift + T,
+            dtype=torch.long,
+            device=idx.device,
+        )
         x = self.token_emb(idx) + self.pos_emb(pos)
 
         # Inject Gist if present (only on first pass, not when using cache)
@@ -206,7 +221,9 @@ class AtomicTransformer(nn.Module):
                 # Get next token from last position
                 last_logits = logits[:, -1, :]
                 if temperature > 0:
-                    probs = torch.nn.functional.softmax(last_logits / temperature, dim=-1)
+                    probs = torch.nn.functional.softmax(
+                        last_logits / temperature, dim=-1
+                    )
                     next_token = torch.multinomial(probs, 1)
                 else:
                     next_token = last_logits.argmax(dim=-1, keepdim=True)
@@ -224,7 +241,9 @@ class AtomicTransformer(nn.Module):
                 logits = self.forward(idx)
                 last_logits = logits[:, -1, :]
                 if temperature > 0:
-                    probs = torch.nn.functional.softmax(last_logits / temperature, dim=-1)
+                    probs = torch.nn.functional.softmax(
+                        last_logits / temperature, dim=-1
+                    )
                     next_token = torch.multinomial(probs, 1)
                 else:
                     next_token = last_logits.argmax(dim=-1, keepdim=True)

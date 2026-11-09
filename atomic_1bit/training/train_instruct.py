@@ -1,26 +1,26 @@
-import sys
-import os
-import glob
+import argparse
 import json
 import math
-import argparse
-import yaml
+import os
+import sys
 from collections import Counter
+
+import yaml
 
 # Add project root to path
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", ".."))
 
-import torch
-import torch.nn.functional as F
-import torch.optim as optim
-import tiktoken
-import numpy as np
-from datasets import load_dataset
-from atomic_1bit.model.transformer import AtomicTransformer, AtomicConfig
+import time  # noqa: E402
 
-import csv
-import time
-from atomic_1bit.utils.thermal import ThermalMonitor
+import numpy as np  # noqa: E402
+import tiktoken  # noqa: E402
+import torch  # noqa: E402
+import torch.nn.functional as F  # noqa: E402
+import torch.optim as optim  # noqa: E402
+from datasets import load_dataset  # noqa: E402
+
+from atomic_1bit.model.transformer import AtomicConfig, AtomicTransformer  # noqa: E402
+from atomic_1bit.utils.thermal import ThermalMonitor  # noqa: E402
 
 # --- EFFICIENT INSTRUCT CONFIG (v1.3, defaults may be overridden by --config) ---
 # "Flagship" 12.5M Parameter Model.
@@ -43,22 +43,32 @@ else:
 _model = _cfg.get("model", {})
 _training = _cfg.get("training", {})
 
-BATCH_SIZE       = _training.get("batch_size",       32)       # Physical batch size
-GRAD_ACCUM_STEPS = _training.get("grad_accum_steps", 8)        # Effective batch = 32 * 8 = 256
-CONTEXT_LEN      = _model.get("context_length",      256)      # Standard for Instructions
-DIM              = _model.get("dim",                  320)      # Sweet Spot
-DEPTH            = _model.get("depth",                8)
-HEADS            = _model.get("heads",                5)        # 320/5 = 64
-VOCAB_SIZE       = _model.get("vocab_size",           4096)     # Compressed
-UNK_ID           = VOCAB_SIZE - 1
-LR               = _training.get("learning_rate",     3e-4)    # Scaled for larger effective batch
-WARMUP_STEPS     = _training.get("warmup_steps",      1000)    # 5% of 20k steps
-CLIP_GRAD        = _training.get("clip_grad",         1.0)     # Gradient Clipping Threshold
-WEIGHT_DECAY     = _training.get("weight_decay",      0.1)     # AdamW weight decay for non-norm parameters
-DROPOUT          = 0.0                                          # Configurable dropout (set >0 to experiment)
+BATCH_SIZE = _training.get("batch_size", 32)  # Physical batch size
+GRAD_ACCUM_STEPS = _training.get(
+    "grad_accum_steps", 8
+)  # Effective batch = 32 * 8 = 256
+CONTEXT_LEN = _model.get("context_length", 256)  # Standard for Instructions
+DIM = _model.get("dim", 320)  # Sweet Spot
+DEPTH = _model.get("depth", 8)
+HEADS = _model.get("heads", 5)  # 320/5 = 64
+VOCAB_SIZE = _model.get("vocab_size", 4096)  # Compressed
+UNK_ID = VOCAB_SIZE - 1
+LR = _training.get("learning_rate", 3e-4)  # Scaled for larger effective batch
+WARMUP_STEPS = _training.get("warmup_steps", 1000)  # 5% of 20k steps
+CLIP_GRAD = _training.get("clip_grad", 1.0)  # Gradient Clipping Threshold
+WEIGHT_DECAY = _training.get(
+    "weight_decay", 0.1
+)  # AdamW weight decay for non-norm parameters
+DROPOUT = 0.0  # Configurable dropout (set >0 to experiment)
+
 
 class EfficientInstructDataset:
-    def __init__(self, split="train", context_length=256, vocab_file="weights/vocab_map_instruct.json"):
+    def __init__(
+        self,
+        split="train",
+        context_length=256,
+        vocab_file="weights/vocab_map_instruct.json",
+    ):
         print(f"Loading Alpaca Cleaned ({split})...")
         raw_dataset = load_dataset("yahma/alpaca-cleaned", split=split)
         self.enc = tiktoken.get_encoding("gpt2")
@@ -86,7 +96,7 @@ class EfficientInstructDataset:
         # 1. Try Load
         if os.path.exists(self.vocab_file):
             print(f"Loading vocab map from {self.vocab_file}...")
-            with open(self.vocab_file, 'r') as f:
+            with open(self.vocab_file, "r") as f:
                 data = json.load(f)
                 self.token_map = {int(k): v for k, v in data["token_map"].items()}
                 self.reverse_map = {int(k): v for k, v in data["reverse_map"].items()}
@@ -115,7 +125,7 @@ class EfficientInstructDataset:
             valid_gpt_ids.append(eot)
 
         # Ensure we don't exceed limit
-        valid_gpt_ids = valid_gpt_ids[:VOCAB_SIZE - 1]
+        valid_gpt_ids = valid_gpt_ids[: VOCAB_SIZE - 1]
 
         for gpt_id in valid_gpt_ids:
             self.token_map[gpt_id] = new_id
@@ -125,12 +135,9 @@ class EfficientInstructDataset:
         self.unk_token = UNK_ID
 
         print(f"Saving vocab map to {self.vocab_file}...")
-        save_data = {
-            "token_map": self.token_map,
-            "reverse_map": self.reverse_map
-        }
+        save_data = {"token_map": self.token_map, "reverse_map": self.reverse_map}
         os.makedirs(os.path.dirname(self.vocab_file), exist_ok=True)
-        with open(self.vocab_file, 'w') as f:
+        with open(self.vocab_file, "w") as f:
             json.dump(save_data, f)
 
     def format_prompt(self, sample):
@@ -161,7 +168,9 @@ class EfficientInstructDataset:
             # Pad
             if len(pocket_ids) < self.context_length + 1:
                 eot_mapped = self.token_map.get(self.enc.eot_token, UNK_ID)
-                pocket_ids = pocket_ids + [eot_mapped] * (self.context_length + 1 - len(pocket_ids))
+                pocket_ids = pocket_ids + [eot_mapped] * (
+                    self.context_length + 1 - len(pocket_ids)
+                )
 
             batch_input_ids.append(pocket_ids[:-1])
             batch_targets.append(pocket_ids[1:])
@@ -169,6 +178,7 @@ class EfficientInstructDataset:
         x = torch.tensor(batch_input_ids, dtype=torch.long)
         y = torch.tensor(batch_targets, dtype=torch.long)
         return x, y
+
 
 def generate_demo(model, ds, instruction="Count to 5."):
     model.eval()
@@ -186,7 +196,8 @@ def generate_demo(model, ds, instruction="Count to 5."):
     eot_mapped = ds.token_map.get(ds.enc.eot_token, UNK_ID)
 
     for _ in range(60):
-        if x.size(1) >= CONTEXT_LEN: break
+        if x.size(1) >= CONTEXT_LEN:
+            break
         with torch.no_grad():
             logits = model(x)
             last_logits = logits[:, -1, :]
@@ -202,25 +213,33 @@ def generate_demo(model, ds, instruction="Count to 5."):
                 pass
 
             x = torch.cat([x, next_token], dim=1)
-            if pocket_id == eot_mapped: break
+            if pocket_id == eot_mapped:
+                break
 
     print("\n")
     model.train()
 
 
-def get_cosine_schedule_with_warmup(optimizer, warmup_steps, total_steps, min_lr_ratio=0.01):
+def get_cosine_schedule_with_warmup(
+    optimizer, warmup_steps, total_steps, min_lr_ratio=0.01
+):
     """Linear warmup followed by cosine decay to min_lr_ratio * base_lr."""
+
     def lr_lambda(step):
         if step < warmup_steps:
             return float(step) / float(max(1, warmup_steps))
-        progress = float(step - warmup_steps) / float(max(1, total_steps - warmup_steps))
+        progress = float(step - warmup_steps) / float(
+            max(1, total_steps - warmup_steps)
+        )
         return max(min_lr_ratio, 0.5 * (1.0 + math.cos(math.pi * progress)))
+
     return optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 
 def init_weights(model):
     """Apply scaled Kaiming initialization to BitLinear latent weights."""
     from atomic_1bit.nn.layers import BitLinear
+
     for name, module in model.named_modules():
         if isinstance(module, BitLinear):
             torch.nn.init.kaiming_normal_(module.weight, a=math.sqrt(5))
@@ -232,14 +251,23 @@ def train():
 
     print(f"--- Atomic-1Bit FLAGSHIP INSTRUCT (12.5M Params, Vocab={VOCAB_SIZE}) ---")
 
-    if torch.backends.mps.is_available(): device = "mps"
-    elif torch.cuda.is_available(): device = "cuda"
-    else: device = "cpu"
+    if torch.backends.mps.is_available():
+        device = "mps"
+    elif torch.cuda.is_available():
+        device = "cuda"
+    else:
+        device = "cpu"
     print(f"Device: {device}")
 
     ds = EfficientInstructDataset(context_length=CONTEXT_LEN)
 
-    config = AtomicConfig(vocab_size=VOCAB_SIZE, dim=DIM, depth=DEPTH, heads=HEADS, context_length=CONTEXT_LEN)
+    config = AtomicConfig(
+        vocab_size=VOCAB_SIZE,
+        dim=DIM,
+        depth=DEPTH,
+        heads=HEADS,
+        context_length=CONTEXT_LEN,
+    )
     model = AtomicTransformer(config).to(device)
 
     start_step = 0
@@ -251,15 +279,18 @@ def train():
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
-        if 'ln' in name or 'bias' in name or 'emb' in name:
+        if "ln" in name or "bias" in name or "emb" in name:
             no_decay_params.append(param)
         else:
             decay_params.append(param)
 
-    optimizer = optim.AdamW([
-        {"params": decay_params, "weight_decay": WEIGHT_DECAY},
-        {"params": no_decay_params, "weight_decay": 0.0},
-    ], lr=LR)
+    optimizer = optim.AdamW(
+        [
+            {"params": decay_params, "weight_decay": WEIGHT_DECAY},
+            {"params": no_decay_params, "weight_decay": 0.0},
+        ],
+        lr=LR,
+    )
 
     # Default total steps (may be overridden if resuming)
     additional_steps = 5000
@@ -274,12 +305,20 @@ def train():
             missing = model_keys - ckpt_keys
             unexpected = ckpt_keys - model_keys
             if missing:
-                print(f"   Warning: {len(missing)} missing key(s) in checkpoint: {sorted(missing)}")
+                print(
+                    f"   Warning: {len(missing)} missing key(s) in checkpoint: {sorted(missing)}"
+                )
             if unexpected:
-                print(f"   Warning: {len(unexpected)} unexpected key(s) in checkpoint: {sorted(unexpected)}")
+                print(
+                    f"   Warning: {len(unexpected)} unexpected key(s) in "
+                    f"checkpoint: {sorted(unexpected)}"
+                )
             result = model.load_state_dict(state_dict, strict=False)
             if result.missing_keys or result.unexpected_keys:
-                print(f"   load_state_dict result — missing: {result.missing_keys}, unexpected: {result.unexpected_keys}")
+                print(
+                    f"   load_state_dict result — missing: {result.missing_keys}, "
+                    f"unexpected: {result.unexpected_keys}"
+                )
             if "step" in checkpoint:
                 start_step = checkpoint["step"]
                 print(f"   Resuming from STEP {start_step}")
@@ -301,12 +340,20 @@ def train():
             missing = model_keys - ckpt_keys
             unexpected = ckpt_keys - model_keys
             if missing:
-                print(f"   Warning: {len(missing)} missing key(s) in checkpoint: {sorted(missing)}")
+                print(
+                    f"   Warning: {len(missing)} missing key(s) in checkpoint: {sorted(missing)}"
+                )
             if unexpected:
-                print(f"   Warning: {len(unexpected)} unexpected key(s) in checkpoint: {sorted(unexpected)}")
+                print(
+                    f"   Warning: {len(unexpected)} unexpected key(s) in "
+                    f"checkpoint: {sorted(unexpected)}"
+                )
             result = model.load_state_dict(state_dict, strict=False)
             if result.missing_keys or result.unexpected_keys:
-                print(f"   load_state_dict result — missing: {result.missing_keys}, unexpected: {result.unexpected_keys}")
+                print(
+                    f"   load_state_dict result — missing: {result.missing_keys}, "
+                    f"unexpected: {result.unexpected_keys}"
+                )
     else:
         print(">> Starting Fresh Model")
         init_weights(model)
@@ -315,19 +362,25 @@ def train():
     print(f"Params: {sum(p.numel() for p in model.parameters())/1e6:.2f}M")
 
     # --- v1.3 STABILITY & MONITORING ---
-    thermal_monitor = ThermalMonitor(high_threshold=80.0, resume_threshold=70.0, check_interval_steps=50)
+    thermal_monitor = ThermalMonitor(
+        high_threshold=80.0, resume_threshold=70.0, check_interval_steps=50
+    )
 
     log_file = os.path.join(weights_dir, "training_log.csv")
     if not os.path.exists(log_file):
         with open(log_file, "w") as f:
             f.write("step,loss,lr,temp,step_time_ms\n")
 
-    steps_input = input(f"Current Step: {start_step}. How many ADDITIONAL steps to train? (Def: 5000): ")
+    steps_input = input(
+        f"Current Step: {start_step}. How many ADDITIONAL steps to train? (Def: 5000): "
+    )
     additional_steps = int(steps_input) if steps_input.strip() else 5000
     total_steps_target = start_step + additional_steps
 
     # Cosine schedule with warmup
-    scheduler = get_cosine_schedule_with_warmup(optimizer, WARMUP_STEPS, total_steps_target)
+    scheduler = get_cosine_schedule_with_warmup(
+        optimizer, WARMUP_STEPS, total_steps_target
+    )
 
     # If resuming, advance scheduler to current step
     if start_step > 0:
@@ -341,9 +394,15 @@ def train():
                     scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
                     print("   Scheduler state restored.")
                 except Exception:
-                    print("   Warning: Could not restore scheduler, using re-computed state.")
+                    print(
+                        "   Warning: Could not restore scheduler, using re-computed state."
+                    )
 
-    print(f"Training from {start_step} to {total_steps_target} (Grad Accum: {GRAD_ACCUM_STEPS}, Eff Batch: {BATCH_SIZE * GRAD_ACCUM_STEPS})...")
+    print(
+        f"Training from {start_step} to {total_steps_target} "
+        f"(Grad Accum: {GRAD_ACCUM_STEPS}, "
+        f"Eff Batch: {BATCH_SIZE * GRAD_ACCUM_STEPS})..."
+    )
 
     optimizer.zero_grad()
 
@@ -352,7 +411,13 @@ def train():
 
         for step in range(start_step, total_steps_target):
             # 1. Thermal Safety Check
-            thermal_monitor.check_and_pause(step, model=model, optimizer=optimizer, scheduler=scheduler, save_path=ckpt_path + ".safe")
+            thermal_monitor.check_and_pause(
+                step,
+                model=model,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                save_path=ckpt_path + ".safe",
+            )
             current_temp = thermal_monitor.get_current_temp()
 
             # Gradient Accumulation
@@ -363,7 +428,7 @@ def train():
 
                 logits = model(x)
                 loss = F.cross_entropy(logits.view(-1, VOCAB_SIZE), y.view(-1))
-                loss = loss / GRAD_ACCUM_STEPS # Normalize
+                loss = loss / GRAD_ACCUM_STEPS  # Normalize
                 loss.backward()
                 loss_accum += loss.item()
 
@@ -384,10 +449,17 @@ def train():
                 current_lr = scheduler.get_last_lr()[0]
                 temp_str = f"{current_temp:.1f}C" if current_temp is not None else "n/a"
                 temp_csv = f"{current_temp:.1f}" if current_temp is not None else ""
-                print(f"Step {step}/{total_steps_target} | Loss: {loss_accum:.4f} | LR: {current_lr:.2e} | Temp: {temp_str} | Time: {step_duration_ms:.1f}ms")
+                print(
+                    f"Step {step}/{total_steps_target} | Loss: {loss_accum:.4f} | "
+                    f"LR: {current_lr:.2e} | Temp: {temp_str} | "
+                    f"Time: {step_duration_ms:.1f}ms"
+                )
 
                 with open(log_file, "a") as f:
-                    f.write(f"{step},{loss_accum:.5f},{current_lr:.5e},{temp_csv},{step_duration_ms:.1f}\n")
+                    f.write(
+                        f"{step},{loss_accum:.5f},{current_lr:.5e},"
+                        f"{temp_csv},{step_duration_ms:.1f}\n"
+                    )
 
             if step % 500 == 0 and step > 0:
                 generate_demo(model, ds, "What is AI?")
@@ -401,8 +473,11 @@ def train():
                     "rng_state": torch.get_rng_state(),
                     "np_rng_state": np.random.get_state(),
                     "config": {
-                        "vocab_size": VOCAB_SIZE, "dim": DIM, "depth": DEPTH,
-                        "heads": HEADS, "context_length": CONTEXT_LEN,
+                        "vocab_size": VOCAB_SIZE,
+                        "dim": DIM,
+                        "depth": DEPTH,
+                        "heads": HEADS,
+                        "context_length": CONTEXT_LEN,
                     },
                 }
                 torch.save(save_dict, ckpt_path)
@@ -416,8 +491,11 @@ def train():
             "rng_state": torch.get_rng_state(),
             "np_rng_state": np.random.get_state(),
             "config": {
-                "vocab_size": VOCAB_SIZE, "dim": DIM, "depth": DEPTH,
-                "heads": HEADS, "context_length": CONTEXT_LEN,
+                "vocab_size": VOCAB_SIZE,
+                "dim": DIM,
+                "depth": DEPTH,
+                "heads": HEADS,
+                "context_length": CONTEXT_LEN,
             },
         }
         torch.save(save_dict, ckpt_path)
@@ -435,6 +513,7 @@ def train():
         }
         torch.save(save_dict, ckpt_path)
         print("Progress saved.")
+
 
 if __name__ == "__main__":
     train()
