@@ -122,6 +122,8 @@ g++ -O3 -std=c++17 atomic_runner.cpp -o runner
   - `--seed`: Random seed for reproducibility.
   - `--start_token`: Single initial token ID (e.g., 58 for "Once").
   - `--prompt 1,2,3`: Comma-separated starting token IDs (overrides `--start_token`).
+  - `--prompt_text "The cat"`: Plain-text prompt, tokenized through `--vocab` via greedy longest-match (requires `--vocab`; overrides `--prompt`). Not a full BPE merge replay, but faithful enough for the shipped frequency-built vocab maps.
+  - `--repeat_penalty F`: Divides the positive logits of every token already in context by `F` each step (1.0 = off). Around 1.1-1.3 noticeably curbs greedy repetition loops.
   - `--stream` / `--no-stream`: Stream tokens as generated (default on) vs. buffer until end.
   - `--vocab`: Path to a `.vocab` detokenizer file (hex per line, made by `tools/make_vocab.py`) to print decoded text instead of token ids. `checkpoints/tiny_stories.vocab` ships for the fixture checkpoint.
   - `--threads N`: Worker threads for the ternary matmuls (default: `min(8, hardware_concurrency)`). A persistent pool splits each projection's output columns; output is bit-identical for any N. `1` = exact serial path. Values above `hardware_concurrency` are clamped with a warning.
@@ -168,6 +170,7 @@ python3 benchmarks/run_suite.py
 - **Outputs**:
   - `assets/chart_model_size.png`
   - `assets/chart_speed.png`
+  - `assets/chart_threads.png`
   - `assets/text_samples_comparison.png`
 
 ---

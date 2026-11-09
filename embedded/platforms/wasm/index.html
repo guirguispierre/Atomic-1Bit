@@ -118,6 +118,9 @@
             <label class="btn" for="model-file">Load .bin Model</label>
             <input type="file" id="model-file" accept=".bin">
 
+            <label class="btn" for="vocab-file">.vocab (optional)</label>
+            <input type="file" id="vocab-file" accept=".vocab">
+
             <button class="btn primary" id="btn-generate" disabled>Generate</button>
             <button class="btn" id="btn-stop" disabled>Stop</button>
             <button class="btn" id="btn-clear">Clear</button>
@@ -152,6 +155,8 @@
     let modelLoaded = false;
     let generating = false;
     let stopRequested = false;
+    // decoded token strings from an optional .vocab file (hex-per-line)
+    let vocabTokens = null;
 
     // WASM module (loaded via Emscripten)
     let Module = null;
@@ -257,6 +262,32 @@
         }
     });
 
+    // Optional .vocab file: one lowercase-hex line per token id, matching
+    // tools/make_vocab.py. Decoded with TextDecoder so multi-byte utf-8
+    // sequences across token boundaries stay intact.
+    const vocabFile = document.getElementById('vocab-file');
+    vocabFile.addEventListener('change', async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        const text = await file.text();
+        const decoder = new TextDecoder('utf-8');
+        vocabTokens = text.split('\n').map(line => {
+            line = line.trim();
+            if (line.length % 2 !== 0) return '';
+            const bytes = new Uint8Array(line.length / 2);
+            for (let i = 0; i < bytes.length; i++)
+                bytes[i] = parseInt(line.substr(i * 2, 2), 16);
+            return decoder.decode(bytes);
+        });
+        setStatus(`Vocab loaded: ${vocabTokens.length} tokens`);
+    });
+
+    function renderToken(t) {
+        if (vocabTokens && t >= 0 && t < vocabTokens.length)
+            return vocabTokens[t];
+        return t + ' ';
+    }
+
     // Temperature sampling in JS (using logits from WASM)
     function sampleWithTemp(temperature) {
         if (temperature < 0.01) {
@@ -324,7 +355,7 @@
             }
 
             tokenCount++;
-            output.textContent += token + ' ';
+            output.textContent += renderToken(token);
 
             const elapsed = (performance.now() - startTime) / 1000;
             const tps = tokenCount / elapsed;

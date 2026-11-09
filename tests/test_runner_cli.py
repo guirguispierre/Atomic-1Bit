@@ -343,6 +343,130 @@ class TestVocab:
         assert "could not load vocab" in res.stderr
 
 
+class TestPromptText:
+    """--prompt_text tokenizes real text through the .vocab file."""
+
+    @staticmethod
+    def _word_vocab(path):
+        # token 1 = "The", 2 = " cat", 3 = " dog"; the rest are single
+        # bytes so any character is encodable
+        lines = []
+        for i in range(CFG.vocab_size):
+            if i == 1:
+                lines.append("The".encode().hex())
+            elif i == 2:
+                lines.append(" cat".encode().hex())
+            elif i == 3:
+                lines.append(" dog".encode().hex())
+            else:
+                lines.append(bytes([i % 95 + 32]).hex())
+        path.write_text("\n".join(lines) + "\n")
+        return path
+
+    def test_requires_vocab(self, exported):
+        plain, _ = exported
+        res = _run_runner(plain, "--prompt_text", "The cat", "--steps", "4")
+        assert res.returncode == 1
+        assert "requires --vocab" in res.stderr
+
+    def test_tokenizes_and_echoes_prompt(self, exported, tmp_path):
+        vocab = self._word_vocab(tmp_path / "w.vocab")
+        plain, _ = exported
+        res = _run_runner(
+            plain,
+            "--vocab",
+            str(vocab),
+            "--prompt_text",
+            "The cat",
+            "--steps",
+            "4",
+            "--temp",
+            "0",
+        )
+        assert res.returncode == 0, res.stderr[-1000:]
+        # the prompt echo detokenizes back to the original text
+        assert "The cat" in res.stdout
+
+    def test_prompt_text_overrides_prompt_ids(self, exported, tmp_path):
+        vocab = self._word_vocab(tmp_path / "w.vocab")
+        plain, _ = exported
+        res = _run_runner(
+            plain,
+            "--vocab",
+            str(vocab),
+            "--prompt",
+            "3,3,3",
+            "--prompt_text",
+            "The cat",
+            "--steps",
+            "2",
+            "--temp",
+            "0",
+        )
+        assert res.returncode == 0, res.stderr[-1000:]
+        assert "The cat" in res.stdout
+
+    def test_missing_value_exits_2(self, exported):
+        plain, _ = exported
+        res = _run_runner(plain, "--prompt_text")
+        assert res.returncode == 2
+        assert "requires a value" in res.stderr
+
+
+class TestThreads:
+    def test_thread_count_does_not_change_output(self, exported):
+        """The LinearPool contract: identical output for any --threads N."""
+        plain, _ = exported
+        args = ("--steps", "24", "--temp", "0", "--prompt", "1,2,3")
+        serial = _run_runner(plain, "--threads", "1", *args)
+        pool4 = _run_runner(plain, "--threads", "4", *args)
+        pool8 = _run_runner(plain, "--threads", "8", *args)
+        for r in (serial, pool4, pool8):
+            assert r.returncode == 0, r.stderr[-500:]
+        assert _stream_text(serial) == _stream_text(pool4)
+        assert _stream_text(serial) == _stream_text(pool8)
+
+    def test_invalid_threads_warns_not_crashes(self, exported):
+        plain, _ = exported
+        res = _run_runner(plain, "--threads", "-3", "--steps", "2", "--temp", "0")
+        assert res.returncode == 0, res.stderr[-500:]
+        assert "invalid" in res.stderr.lower() or "Warning" in res.stderr
+
+
+class TestRepeatPenalty:
+    def test_zero_or_negative_exits_2(self, exported):
+        plain, _ = exported
+        for bad in ("0", "-1.5"):
+            res = _run_runner(
+                plain, "--repeat_penalty", bad, "--steps", "2", "--temp", "0"
+            )
+            assert res.returncode == 2
+            assert "--repeat_penalty" in res.stderr
+
+    def test_penalty_run_completes(self, exported):
+        plain, _ = exported
+        res = _run_runner(
+            plain,
+            "--repeat_penalty",
+            "1.5",
+            "--steps",
+            "12",
+            "--temp",
+            "0",
+            "--start_token",
+            "1",
+        )
+        assert res.returncode == 0, res.stderr[-1000:]
+        # greedy still produced a full token stream
+        assert len(_generated_tokens(res)) == 12
+
+    def test_missing_value_exits_2(self, exported):
+        plain, _ = exported
+        res = _run_runner(plain, "--repeat_penalty")
+        assert res.returncode == 2
+        assert "requires a value" in res.stderr
+
+
 class TestCLIValidation:
     def test_unknown_flag_exits_2(self, exported):
         plain, _ = exported

@@ -10,20 +10,23 @@ tests have nothing to run on. It is a pipeline proof, not a quality model.
 | Field | Value |
 |---|---|
 | Config | vocab 2048, dim 128, depth 4, heads 4, ctx 64 (1,320,064 params) |
-| Training | 2,000 steps, batch 32, AdamW lr 1e-3, CPU only, ~160 s on M-series |
-| Data | TinyStories (HF `roneneldan/TinyStories`), first 20k train rows; seed 0 |
-| Final loss | 4.87 (avg over last 100 steps) |
-| Held-out perplexity | **115.5** vs 2048 uniform (64-batch eval, ~131k tokens) |
+| Training | 14,000 steps total, batch 32, AdamW lr 1e-3 (2,000 via `train_fixture_checkpoint.py` + 12,000 via `tools/continue_fixture.py` on MPS) |
+| Data | TinyStories (HF `roneneldan/TinyStories`); vocab map unchanged |
+| Final train loss | ~3.5 |
+| Held-out perplexity | **42.0** vs 2048 uniform, measured on the stored fp16 artifact with the same `validation[:1000]` eval harness (the 2,000-step version scored 115.5) |
 | Stored dtype | **float16** state dict (keeps the file under ~3 MB; `load_state_dict` upcasts to float32, and Python/C++ see identical stored weights) |
 
-Uniform-perplexity baseline for this vocab is 2048; 115.5 shows the
-checkpoint learned real structure, which is all it is for. Generation
-samples will read as TinyStories-flavored fragments, not stories.
+Uniform-perplexity baseline for this vocab is 2048; 42.0 means the
+checkpoint produces genuinely readable TinyStories text -- e.g. temp-0.8
+sampling gives *"Once upon a time, there was a little bird loved to be a
+noise too. One day, Lucy ... He was so excited to the ghost."* It is
+still a 1.3M-parameter fixture, not a storyteller.
 
 ## How it was produced
 
 ```bash
 python3 tools/train_fixture_checkpoint.py --steps 2000
+python3 tools/continue_fixture.py --steps 12000   # resumes, non-interactive
 ```
 
 `tiny_stories_vocab.json` is the gpt2-id -> model-id frequency map the same

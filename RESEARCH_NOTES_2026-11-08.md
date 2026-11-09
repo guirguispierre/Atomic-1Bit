@@ -89,6 +89,28 @@ torch 2.8.0, Python 3.9 venv. This run closes out the findings from
   loader is a proof-of-concept stub with no forward pass to fix);
   `pio run` now compiles the firmware in CI.
 
+## Round 3: fixture quality jump + interactive features
+
+- **Fixture retrained 2000 -> 14,000 steps** (`tools/continue_fixture.py`,
+  TinyStories train[:10%] on MPS, ~50 min): held-out perplexity on the
+  identical `validation[:1000]` harness dropped **115.5 -> 42.0** (fp16
+  stored artifact; the 2000-step model reproduced 115.5 exactly, so the
+  protocol comparison is apples-to-apples). C++-sampled output went from
+  word-fragments to grammatical text with dialogue. The checkpoint was
+  repackaged fp16 with `config` + `training` metadata so parity and tests
+  consume it identically.
+- **`--prompt_text` + `--repeat_penalty`** in the runner: text prompts
+  tokenize via the `.vocab` map (greedy longest-match), and a presence
+  penalty curbs greedy loops.
+- **`export_model(prompt=...)` repaired**: it called a nonexistent
+  `model.gist_encoder.encode()`; now tokenizes via `vocab_map` and
+  mean-pools `token_emb` (the same mechanism `gen_gist.py` uses).
+- **`examples/generate.py` works out of the box** on the fixture:
+  infers config from checkpoint tensor shapes and applies the vocab map.
+- **WASM demo + thread-identity tests**: `index.html` decodes tokens to
+  text through an optional `.vocab`; `TestThreads` locks byte-identical
+  output across `--threads` counts. 230 tests pass total.
+
 ## Caveats kept honest
 
 - KV cache still rebuilds once the window exceeds context_length

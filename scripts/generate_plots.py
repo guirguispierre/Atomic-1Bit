@@ -56,6 +56,25 @@ for i, v in enumerate(values):
     plt.text(i, v + 10, f"{v}", ha="center", color="white")
 save_plot("chart_speed")
 
+# 2b. Thread scaling chart
+# 2026-11-08 arm64 macOS (M5 Pro), embedded/runner --threads N, 200-token
+# decode. QuickStart config = 256d/6L/4H/4096v/ctx128; tiny fixture =
+# 128d/4L/4H/2048v/ctx64. Output is bit-identical for any N.
+threads_x = [1, 2, 4, 8]
+threads_data = {
+    "QuickStart (6.85M)": [3315, 4506, 5649, 5408],
+    "Tiny fixture (1.32M)": [13930, 15786, 15299, 15135],
+}
+plt.figure(figsize=(6, 4))
+for label, ys in threads_data.items():
+    plt.plot(threads_x, ys, marker="o", label=label)
+plt.title("Decode Throughput vs --threads")
+plt.xlabel("Worker threads")
+plt.ylabel("Tokens / Sec")
+plt.xticks(threads_x)
+plt.legend()
+save_plot("chart_threads")
+
 # 3. Summary Table
 data = [
     ["Metric", "FP16 Baseline", "Atomic-1Bit"],

@@ -77,6 +77,7 @@ def export_model(
     prompt: str = None,
     gist_file: str = None,
     format_version: int = FORMAT_VERSION,
+    vocab_map: str = None,
 ):
     if format_version not in (2, FORMAT_VERSION):
         raise ValueError(
@@ -115,12 +116,36 @@ def export_model(
                 print(f"Error reading gist file: {e}")
 
     elif prompt:
+        # Same mechanism as tools/gen_gist.py: tokenize with gpt2 ids, remap
+        # through the model's vocab map, then mean-pool token_emb so the gist
+        # lives in the model's own latent space.
+        if vocab_map is None:
+            raise ValueError(
+                "export_model(prompt=...) needs vocab_map=<json> to map text "
+                "to model ids; alternatively pass gist_file=<float32 file> "
+                "(see tools/gen_gist.py)"
+            )
+        import json
+
+        import tiktoken
+
+        with open(vocab_map) as vf:
+            token_map = {int(k): v for k, v in json.load(vf)["token_map"].items()}
+        unk = model.config.vocab_size - 1
+        ids = [
+            token_map.get(g, unk) for g in tiktoken.get_encoding("gpt2").encode(prompt)
+        ]
+        if not ids:
+            raise ValueError("prompt produced no model tokens")
         has_gist = 1
-        print(f"  Computing Gist for prompt: '{prompt}'")
+        print(
+            f"  Computing Gist for prompt: '{prompt}' "
+            f"({len(ids)} tokens, mean-pooled token_emb)"
+        )
         model.eval()
         with torch.no_grad():
-            # Assumes model.gist_encoder exists and is trained
-            gist_vector = model.gist_encoder.encode(prompt).squeeze(0)  # (Dim,)
+            embeds = model.token_emb(torch.tensor([ids], dtype=torch.long))
+            gist_vector = embeds.mean(dim=1).squeeze(0)  # (Dim,)
 
     with open(filename, "wb") as f:
         # 1. Header with Magic Bytes and Version
@@ -253,7 +278,14 @@ if __name__ == "__main__":
         "--prompt",
         type=str,
         default=None,
-        help="System Prompt to bake into Gist (Optional)",
+        help="System Prompt to bake into Gist (Optional; needs --vocab_map)",
+    )
+    parser.add_argument(
+        "--vocab_map",
+        type=str,
+        default=None,
+        help="JSON vocab map for --prompt text -> model ids "
+        "(e.g. checkpoints/tiny_stories_vocab.json)",
     )
     parser.add_argument(
         "--gist_file",
@@ -312,4 +344,5 @@ if __name__ == "__main__":
         prompt=args.prompt,
         gist_file=args.gist_file,
         format_version=args.format_version,
+        vocab_map=args.vocab_map,
     )
