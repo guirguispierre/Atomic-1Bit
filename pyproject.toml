@@ -1,0 +1,7 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+# Metadata stays in setup.py because the build also compiles the C++
+# kernel (atomic_1bit/core -> libatomic.so); this file exists so modern
+# pip/build frontends pick the right backend instead of the legacy path.

@@ -63,7 +63,9 @@ make serve
 
 # 5. Open http://localhost:8080/index.html in your browser
 # 6. Click "Load .bin Model" and select the .bin file
-# 7. Click "Generate" to run inference
+# 7. (Optional) click ".vocab" and select a detokenizer file
+#    (checkpoints/tiny_stories.vocab) to see words instead of token ids
+# 8. Click "Generate" to run inference
 ```
 
 ## Architecture
@@ -87,7 +89,9 @@ Browser
 3. **Sampling**: Greedy decoding runs in WASM. Temperature sampling reads the logits
    buffer from WASM memory and samples in JavaScript.
 
-4. **Output**: Token IDs are displayed in real-time with TPS measurement.
+4. **Output**: Token IDs stream in real-time with TPS measurement. Loading an
+   optional `.vocab` file (the same hex-per-line format as `tools/make_vocab.py`)
+   decodes each token to its raw bytes, so real text renders in the browser.
 
 ## Memory Budget
 
@@ -107,6 +111,7 @@ which is well within browser limits.
 | Control | Description |
 |---------|-------------|
 | **Load .bin Model** | Select an ATOM-format model binary |
+| **.vocab (optional)** | Select a hex-per-line detokenizer for text output |
 | **Generate** | Start autoregressive token generation |
 | **Stop** | Stop generation early |
 | **Clear** | Clear output and reset context |

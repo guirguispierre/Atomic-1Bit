@@ -11,6 +11,7 @@
 #include <mutex>
 #include <random>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 using namespace std;
@@ -674,7 +675,7 @@ struct Workspace {
   vector<int32_t> acc32;
 
   void ensure_size(int max_seq_len, int dim) {
-    int max_el = max_seq_len * dim;
+    size_t max_el = (size_t)max_seq_len * (size_t)dim;
     if (X.size() < max_el) {
       X.resize(max_el);
       X_norm.resize(max_el);
@@ -1146,6 +1147,44 @@ static vector<int> parse_token_list(const string &s) {
   return out;
 }
 
+// Greedy longest-match tokenizer over .vocab byte strings -- the inverse of
+// the detokenizer. Not a full BPE merge replay, but for the frequency-built
+// maps used here it round-trips well enough to accept a real text prompt
+// instead of numeric ids. Unencodable characters map to unk_id.
+static bool tokenize_text(const string &text, const vector<string> &vocab,
+                          int unk_id, vector<int> &ids) {
+  unordered_map<string, int> b2i;
+  size_t max_len = 0;
+  for (int i = 0; i < (int)vocab.size(); ++i) {
+    const string &b = vocab[i];
+    if (b.empty())
+      continue;
+    b2i.emplace(b, i);
+    max_len = max(max_len, b.size());
+  }
+  if (b2i.empty())
+    return false;
+  size_t pos = 0;
+  while (pos < text.size()) {
+    size_t best = 0;
+    size_t lim = min(max_len, text.size() - pos);
+    for (size_t n = lim; n > 0; --n) {
+      if (b2i.count(text.substr(pos, n))) {
+        best = n;
+        break;
+      }
+    }
+    if (best == 0) {
+      ids.push_back(unk_id);
+      pos += 1;
+    } else {
+      ids.push_back(b2i[text.substr(pos, best)]);
+      pos += best;
+    }
+  }
+  return !ids.empty();
+}
+
 static void print_help() {
   cout << "Atomic-1Bit Runner\n"
        << "  --model PATH         Model .bin path (default atomic_model.bin)\n"
@@ -1156,6 +1195,9 @@ static void print_help() {
        << "  --seed N             RNG seed (default 42)\n"
        << "  --start_token N      Single starting token id (default 42)\n"
        << "  --prompt 1,2,3       Comma-separated starting token ids (overrides --start_token)\n"
+       << "  --prompt_text STR    Text prompt, tokenized via --vocab (greedy longest-match)\n"
+       << "  --repeat_penalty F   Divide positive logits of already-seen tokens by F\n"
+       << "                       (1.0 = off; ~1.1-1.3 curbs repetition loops)\n"
        << "  --vocab PATH         .vocab file (hex-per-line, tools/make_vocab.py) to print text instead of ids\n"
        << "  --threads N          Worker threads for the ternary matmuls\n"
        << "                       (default: min(8, hardware_concurrency); 1 = exact serial path).\n"
@@ -1176,6 +1218,8 @@ int main(int argc, char **argv) {
   float top_p = 0.0f;
   int seed = 42;
   int start_token = 42;
+  string prompt_text;
+  float repeat_penalty = 1.0f;
   int threads = 0; // 0 = default, resolved after parsing
   bool parity_mode = false;
   bool stream = true;
@@ -1217,6 +1261,12 @@ int main(int argc, char **argv) {
     } else if (arg == "--prompt") {
       if (!need_value(i, arg)) return 2;
       prompt_str = argv[++i];
+    } else if (arg == "--prompt_text") {
+      if (!need_value(i, arg)) return 2;
+      prompt_text = argv[++i];
+    } else if (arg == "--repeat_penalty") {
+      if (!need_value(i, arg)) return 2;
+      repeat_penalty = (float)atof(argv[++i]);
     } else if (arg == "--vocab") {
       if (!need_value(i, arg)) return 2;
       vocab_path = argv[++i];
@@ -1258,6 +1308,11 @@ int main(int argc, char **argv) {
     }
   }
 
+  if (repeat_penalty <= 0.0f) {
+    cerr << "Error: --repeat_penalty must be > 0 (1.0 disables it)" << endl;
+    return 2;
+  }
+
   if (parity_mode) {
     cout << "--- C++ Parity Check ---" << endl;
     gen_len = 1;
@@ -1284,6 +1339,19 @@ int main(int argc, char **argv) {
   if (!vocab_path.empty() && !load_vocab(vocab_path.c_str(), vocab)) {
     cerr << "Error: could not load vocab file " << vocab_path << endl;
     return 1;
+  }
+
+  if (!prompt_text.empty()) {
+    if (vocab.empty()) {
+      cerr << "Error: --prompt_text requires --vocab PATH to tokenize text"
+           << endl;
+      return 1;
+    }
+    if (!tokenize_text(prompt_text, vocab, model.config.vocab_size - 1,
+                       context)) {
+      cerr << "Error: --prompt_text produced no tokens" << endl;
+      return 1;
+    }
   }
 
   for (int t : context) {
@@ -1349,6 +1417,14 @@ int main(int argc, char **argv) {
       // Defensive: unreachable after the ctx_cap slide above, but keep the
       // guard so a future edit can't turn an overflow into silent zero logits.
       cache.len = -1;
+    }
+    if (repeat_penalty > 0.0f && fabsf(repeat_penalty - 1.0f) > 1e-6f) {
+      for (int t : context) {
+        if (logits[t] >= 0.0f)
+          logits[t] /= repeat_penalty;
+        else
+          logits[t] *= repeat_penalty;
+      }
     }
     int next_token = sample_logits(logits, temp, top_k, top_p, rng);
     generated.push_back(next_token);

@@ -113,7 +113,12 @@ Flags:
 - `--seed` -- Random seed for reproducibility
 - `--start_token` -- Single starting token ID (default 42)
 - `--prompt 1,2,3` -- Comma-separated starting token IDs (overrides `--start_token`)
+- `--prompt_text "The cat"` -- Plain-text prompt tokenized via `--vocab` (overrides `--prompt`)
+- `--vocab PATH` -- `.vocab` detokenizer (hex per line, `tools/make_vocab.py`) for text output
+- `--repeat_penalty F` -- Penalize already-seen tokens (1.0 = off; ~1.1-1.3 curbs loops)
+- `--threads N` -- Worker threads for the matmul pool (default min(8, hw); bit-identical output)
 - `--stream` / `--no-stream` -- Stream tokens as generated, or buffer until end
+- `--parity` -- Single-step forward with per-probe dumps (used by `tools/parity_check.py`)
 - `--help` -- Show all flags
 
 ## Exporting Models

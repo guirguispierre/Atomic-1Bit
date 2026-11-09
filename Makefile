@@ -30,6 +30,10 @@ verify: kernel runner
 test:
 	"$(PY)" -m pytest tests/ -x -q
 
+bench: kernel runner
+	"$(PY)" benchmarks/run_suite.py
+	"$(PY)" benchmarks/kernel_micro.py
+
 clean:
 	$(MAKE) -C atomic_1bit/core clean
 	rm -f embedded/runner embedded/atomic_model.bin

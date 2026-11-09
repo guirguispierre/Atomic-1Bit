@@ -174,6 +174,52 @@ class TestLibKVCache:
         ), f"gist cached decode diverged:\n{res.stdout}\n{res.stderr}"
 
 
+class TestGistPromptExport:
+    """export_model(prompt=..., vocab_map=...) must actually produce a gist
+    model. It previously called a nonexistent model.gist_encoder.encode() and
+    crashed on every model -- this test keeps the repaired path (tokenize ->
+    vocab map -> mean-pool token_emb) honest."""
+
+    @pytest.mark.skipif(not os.path.exists(RUNNER), reason="C++ runner not built")
+    def test_prompt_path_produces_gist_model(self, tmp_path):
+        vocab_map = os.path.join(REPO, "checkpoints", "tiny_stories_vocab.json")
+        if not os.path.exists(vocab_map):
+            pytest.skip("fixture vocab map missing")
+        torch.manual_seed(1234)
+        # vocab must cover the map's model ids (0..2047 for the fixture map)
+        model = AtomicTransformer(
+            AtomicConfig(vocab_size=2048, dim=64, depth=4, heads=4, context_length=32)
+        )
+        model.eval()
+        path = tmp_path / "gist_prompt.bin"
+        export_model(model, str(path), prompt="You are kind", vocab_map=vocab_map)
+        res = subprocess.run(
+            [
+                RUNNER,
+                "--model",
+                str(path),
+                "--steps",
+                "4",
+                "--temp",
+                "0",
+                "--start_token",
+                "1",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert res.returncode == 0, res.stderr[-500:]
+        assert "HasGist=1" in res.stdout
+
+    def test_prompt_path_without_map_errors_clearly(self, tmp_path):
+        torch.manual_seed(1234)
+        model = AtomicTransformer(CFG)
+        model.eval()
+        with pytest.raises(ValueError, match="vocab_map"):
+            export_model(model, str(tmp_path / "x.bin"), prompt="hi")
+
+
 class TestGistPositionParity:
     """PyTorch vs C++ runner must agree on positions under a gist.
 

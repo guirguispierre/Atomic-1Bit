@@ -72,6 +72,7 @@ over a 200-step run that spends most of its steps past it. The Python path
 
 ![Model Size Comparison](assets/chart_model_size.png)
 ![Speed Comparison](assets/chart_speed.png)
+![Thread Scaling](assets/chart_threads.png)
 ![Text Samples](assets/text_samples_comparison.png)
 
 </details>
@@ -80,30 +81,32 @@ over a 200-step run that spends most of its steps past it. The Python path
 
 Size and speed numbers only matter if the model says something. The repo ships
 a small checked-in checkpoint (`checkpoints/tiny_stories.pt`, 1.32M params,
-2,000 TinyStories steps, ~2.5 min CPU) so every number below is reproducible
+14,000 TinyStories steps) so every number below is reproducible
 out of the box:
 
 | Metric | Value |
 |:---|---:|
-| Held-out perplexity | **115.5** |
+| Held-out perplexity | **42.0** |
 | Uniform baseline (learned nothing) | 2048 |
-| Distinct trigram ratio | 0.84 |
-| 5-gram repetition rate | 0.003 |
+| Distinct trigram ratio | 0.99 |
+| 5-gram repetition rate | 0.000 |
 
 Sampled from the C++ engine at `temp 0.9, seed 13`, reading a 533 KB packed
 binary (`--vocab checkpoints/tiny_stories.vocab`):
 
 ```
-would day and Max gave walk child. bark ran, friends day was excited looked
-so She Ben to. in the".. wanted Joe to he her
+As he had an idea. She hugged it to fly. The little duck and took out to be
+at her. She felt happy far. She smiled and peek out, would have her shop.
+"I'm still's silly. "Don't worry, it's friend! You are very brave thing!
 ```
 
-That is the honest state of it: TinyStories words and fragments with local
-grammar, but not a story. The fixture exists so parity checks and quality
-evals run instantly -- `python3 tools/parity_check.py` -- and longer training
-on the bigger presets (`stories_base`, `flagship_12m`) is the path to better
-samples. Checkpoints produced by `python3 atomic_1bit/training/train.py` land
-in `weights/`, which is gitignored.
+That is the honest state of it: grammatical TinyStories text with dialogue,
+still recognizably 1.3M-parameter-local. The fixture exists so parity checks
+and quality evals run instantly -- `python3 tools/parity_check.py` -- and
+`tools/continue_fixture.py` can extend it further; the bigger presets
+(`stories_base`, `flagship_12m`) are the path to better samples. Checkpoints
+produced by `python3 atomic_1bit/training/train.py` land in `weights/`,
+which is gitignored.
 
 ---
 
@@ -173,6 +176,11 @@ g++ -O3 -std=c++17 atomic_runner.cpp -o runner
 # the repo ships one for checkpoints/tiny_stories.pt
 ./runner --model atomic_model.bin --steps 100 --temp 0.7 --seed 42 \
   --vocab ../checkpoints/tiny_stories.vocab
+
+# Type a real prompt and curb repetition while you're at it
+./runner --model atomic_model.bin --steps 100 --temp 0.9 --seed 42 \
+  --vocab ../checkpoints/tiny_stories.vocab \
+  --prompt_text "Once upon a time" --repeat_penalty 1.2
 ```
 
 See [docs/COMMANDS.md](docs/COMMANDS.md) for the full command reference and [docs/INSTALL.md](docs/INSTALL.md) for detailed installation instructions.
