@@ -11,14 +11,15 @@ Usage:
     python3 examples/quickstart.py
 """
 
-import sys
 import os
+import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import torch
-from atomic_1bit.model.transformer import AtomicTransformer, AtomicConfig
-from atomic_1bit.nn.layers import BitLinear, weight_quant
+import torch  # noqa: E402
+
+from atomic_1bit.model.transformer import AtomicConfig, AtomicTransformer  # noqa: E402
+from atomic_1bit.nn.layers import weight_quant  # noqa: E402
 
 
 def main():
@@ -48,7 +49,9 @@ def main():
     quantized, scale = weight_quant(sample_weight)
 
     unique_vals = torch.unique(quantized.round())
-    print(f"Original weight range: [{sample_weight.min():.4f}, {sample_weight.max():.4f}]")
+    print(
+        f"Original weight range: [{sample_weight.min():.4f}, {sample_weight.max():.4f}]"
+    )
     print(f"Quantized to: {sorted([int(v.item()) for v in unique_vals])}")
     print(f"Scale factor: {scale.item():.4f}")
 
@@ -57,7 +60,9 @@ def main():
     n_neg = (quantized.round() == -1).sum().item()
     n_zero = (quantized.round() == 0).sum().item()
     n_pos = (quantized.round() == 1).sum().item()
-    print(f"Distribution: -1={n_neg/total:.1%}, 0={n_zero/total:.1%}, +1={n_pos/total:.1%}")
+    print(
+        f"Distribution: -1={n_neg/total:.1%}, 0={n_zero/total:.1%}, +1={n_pos/total:.1%}"
+    )
     print(f"Sparsity (zero weights): {n_zero/total:.1%}")
 
     # --- 3. Forward pass ---

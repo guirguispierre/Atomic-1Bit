@@ -1,10 +1,8 @@
-import pytest
-import struct
 import os
+import struct
 import tempfile
-import torch
 
-from atomic_1bit.model.transformer import AtomicTransformer, AtomicConfig
+from atomic_1bit.model.transformer import AtomicConfig, AtomicTransformer
 from atomic_1bit.utils.export_to_cpp import export_model
 
 
@@ -80,12 +78,15 @@ class TestExportModel:
     def test_different_configs_different_sizes(self):
         """Larger model should produce larger binary."""
         small = AtomicConfig(vocab_size=64, dim=32, depth=2, heads=4, context_length=16)
-        large = AtomicConfig(vocab_size=256, dim=64, depth=4, heads=4, context_length=32)
+        large = AtomicConfig(
+            vocab_size=256, dim=64, depth=4, heads=4, context_length=32
+        )
         model_small = AtomicTransformer(small)
         model_large = AtomicTransformer(large)
 
-        with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as f1, \
-             tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as f2:
+        with tempfile.NamedTemporaryFile(
+            suffix=".bin", delete=False
+        ) as f1, tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as f2:
             path1, path2 = f1.name, f2.name
         try:
             export_model(model_small, path1)

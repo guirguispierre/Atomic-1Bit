@@ -6,11 +6,13 @@ Usage:
     cfg = load_config("configs/flagship_12m.yaml")
     model_config = config_to_atomic(cfg)
 """
+
 import json
 import os
 
 try:
     import yaml
+
     HAS_YAML = True
 except ImportError:
     HAS_YAML = False
@@ -23,12 +25,14 @@ def load_config(path: str) -> dict:
     if not os.path.exists(path):
         raise FileNotFoundError(f"Config file not found: {path}")
 
-    with open(path, 'r') as f:
-        if path.endswith('.yaml') or path.endswith('.yml'):
+    with open(path, "r") as f:
+        if path.endswith(".yaml") or path.endswith(".yml"):
             if not HAS_YAML:
-                raise ImportError("PyYAML is required for YAML configs: pip install pyyaml")
+                raise ImportError(
+                    "PyYAML is required for YAML configs: pip install pyyaml"
+                )
             return yaml.safe_load(f)
-        elif path.endswith('.json'):
+        elif path.endswith(".json"):
             return json.load(f)
         else:
             raise ValueError(f"Unsupported config format: {path}")

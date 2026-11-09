@@ -1,15 +1,18 @@
-import torch
-import struct
 import os
+import struct
 import sys
 
 import numpy as np
+import torch
 
 # Add project root to path
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from atomic_1bit.model.transformer import AtomicTransformer, AtomicConfig
-from atomic_1bit.model.gist import GistEncoder, GistConfig
+from atomic_1bit.model.transformer import (  # noqa: E402
+    AtomicConfig,
+    AtomicTransformer,
+)
+
 
 def quantize_and_transpose_weight(w):
     scale = 1.0 / w.abs().mean().clamp(min=1e-5)
@@ -37,7 +40,7 @@ def unpack_ternary(packed, count):
     """Inverse of pack_ternary, for tests and tooling."""
     b = np.frombuffer(packed, dtype=np.uint8)
     codes = np.stack([b & 3, (b >> 2) & 3, (b >> 4) & 3, (b >> 6) & 3], axis=1)
-    return (codes.reshape(-1)[:count].astype(np.int8) - 1)
+    return codes.reshape(-1)[:count].astype(np.int8) - 1
 
 
 # Current binary format version. v2 packs ternary weights four per byte and
@@ -68,37 +71,48 @@ def dequantize_embedding_int8(scales, codes):
     return codes.astype(np.float32) * scales[:, None]
 
 
-def export_model(model: AtomicTransformer, filename: str, prompt: str = None, gist_file: str = None,
-                 format_version: int = FORMAT_VERSION):
+def export_model(
+    model: AtomicTransformer,
+    filename: str,
+    prompt: str = None,
+    gist_file: str = None,
+    format_version: int = FORMAT_VERSION,
+):
     if format_version not in (2, FORMAT_VERSION):
         raise ValueError(
             f"format_version must be 2 or {FORMAT_VERSION}, got {format_version}"
         )
 
-    print(f"Exporting model to {filename} (v{format_version}, "
-          f"Gist: {prompt if prompt else 'None'})...")
+    print(
+        f"Exporting model to {filename} (v{format_version}, "
+        f"Gist: {prompt if prompt else 'None'})..."
+    )
 
     # Gist Vector
     has_gist = 0
     gist_vector = None
 
     if gist_file:
-         print(f"  Loading Gist Vector from file: {gist_file}")
-         if not os.path.exists(gist_file):
-             print("Error: Gist file not found.")
-             has_gist = 0
-         else:
-             import numpy as np
-             # Read raw float32 bytes
-             try:
-                 gist_vector_np = np.fromfile(gist_file, dtype=np.float32)
-                 if len(gist_vector_np) != model.config.dim:
-                     print(f"Error: Gist dimension mismatch. Expected {model.config.dim}, got {len(gist_vector_np)}")
-                 else:
-                     gist_vector = torch.tensor(gist_vector_np)
-                     has_gist = 1
-             except Exception as e:
-                 print(f"Error reading gist file: {e}")
+        print(f"  Loading Gist Vector from file: {gist_file}")
+        if not os.path.exists(gist_file):
+            print("Error: Gist file not found.")
+            has_gist = 0
+        else:
+            import numpy as np
+
+            # Read raw float32 bytes
+            try:
+                gist_vector_np = np.fromfile(gist_file, dtype=np.float32)
+                if len(gist_vector_np) != model.config.dim:
+                    print(
+                        f"Error: Gist dimension mismatch. Expected "
+                        f"{model.config.dim}, got {len(gist_vector_np)}"
+                    )
+                else:
+                    gist_vector = torch.tensor(gist_vector_np)
+                    has_gist = 1
+            except Exception as e:
+                print(f"Error reading gist file: {e}")
 
     elif prompt:
         has_gist = 1
@@ -106,7 +120,7 @@ def export_model(model: AtomicTransformer, filename: str, prompt: str = None, gi
         model.eval()
         with torch.no_grad():
             # Assumes model.gist_encoder exists and is trained
-            gist_vector = model.gist_encoder.encode(prompt).squeeze(0) # (Dim,)
+            gist_vector = model.gist_encoder.encode(prompt).squeeze(0)  # (Dim,)
 
     with open(filename, "wb") as f:
         # 1. Header with Magic Bytes and Version
@@ -121,42 +135,55 @@ def export_model(model: AtomicTransformer, filename: str, prompt: str = None, gi
         c = model.config
 
         # Struct: Magic(I), Ver(I), Vocab(I), Dim(I), Depth(I), Heads(I), CTX(I), Gist(I)
-        header = struct.pack("iiiiiiii", magic, version, c.vocab_size, c.dim, c.depth, c.heads, c.context_length, has_gist)
+        header = struct.pack(
+            "iiiiiiii",
+            magic,
+            version,
+            c.vocab_size,
+            c.dim,
+            c.depth,
+            c.heads,
+            c.context_length,
+            has_gist,
+        )
         f.write(header)
 
         # 1.5 Write Gist Vector if present
         if has_gist == 1:
             if gist_vector is not None:
-                f.write(gist_vector.detach().cpu().numpy().astype('float32').tobytes())
+                f.write(gist_vector.detach().cpu().numpy().astype("float32").tobytes())
 
         # Helper to write tensor
-        def write_tensor(name, tensor, dtype='f', needs_quant=False):
+        def write_tensor(name, tensor, dtype="f", needs_quant=False):
             # dtype: 'f' for float32, 'b' for int8
             # needs_quant: If True, quantize float->int8{-1,0,1} and transpose
 
             if needs_quant:
-                 # Compute scale (mean_abs)
-                 # w_f32 ~= w_q * scale
-                 # scale = mean(abs(w))
-                 scale_val = tensor.abs().mean().clamp(min=1e-5).item()
-                 packed = struct.pack("f", scale_val)
-                 import binascii
-                 hex_str = binascii.hexlify(packed).decode('utf-8')
-                 f.write(packed)
-                 print(f"  Wrote scale: {scale_val:.6f} [Hex: {hex_str}]")
+                # Compute scale (mean_abs)
+                # w_f32 ~= w_q * scale
+                # scale = mean(abs(w))
+                scale_val = tensor.abs().mean().clamp(min=1e-5).item()
+                packed = struct.pack("f", scale_val)
+                import binascii
 
-                 data = quantize_and_transpose_weight(tensor)
-                 blob = pack_ternary(data)
-                 f.write(blob.tobytes())
-                 print(f"  Wrote {name}: {data.shape} -> {blob.size} bytes (2-bit packed)")
-                 return
+                hex_str = binascii.hexlify(packed).decode("utf-8")
+                f.write(packed)
+                print(f"  Wrote scale: {scale_val:.6f} [Hex: {hex_str}]")
+
+                data = quantize_and_transpose_weight(tensor)
+                blob = pack_ternary(data)
+                f.write(blob.tobytes())
+                print(
+                    f"  Wrote {name}: {data.shape} -> {blob.size} bytes (2-bit packed)"
+                )
+                return
 
             data = tensor.detach().cpu().numpy()
-            if dtype == 'f':
-                data = data.astype('float32') # Ensure float32
+            if dtype == "f":
+                data = data.astype("float32")  # Ensure float32
                 f.write(data.tobytes())
-            elif dtype == 'b':
-                data = data.astype('int8')
+            elif dtype == "b":
+                data = data.astype("int8")
                 f.write(data.tobytes())
             print(f"  Wrote {name}: {data.shape} ({dtype})")
 
@@ -168,61 +195,84 @@ def export_model(model: AtomicTransformer, filename: str, prompt: str = None, gi
             scales, codes = quantize_embedding_int8(tensor)
             f.write(scales.tobytes())
             f.write(codes.tobytes())
-            print(f"  Wrote {name}: {codes.shape} + {scales.size} scales "
-                  f"(int8, {scales.nbytes + codes.nbytes} bytes)")
+            print(
+                f"  Wrote {name}: {codes.shape} + {scales.size} scales "
+                f"(int8, {scales.nbytes + codes.nbytes} bytes)"
+            )
 
         if version >= 3:
             write_embedding("token_emb", model.token_emb.weight)
             write_embedding("pos_emb", model.pos_emb.weight)
         else:
-            write_tensor("token_emb", model.token_emb.weight, 'f')
-            write_tensor("pos_emb", model.pos_emb.weight, 'f')
+            write_tensor("token_emb", model.token_emb.weight, "f")
+            write_tensor("pos_emb", model.pos_emb.weight, "f")
 
         # 3. Layers
         for i, layer in enumerate(model.layers):
             print(f"  [Layer {i}]")
             # LN1
-            write_tensor(f"layer{i}.ln1", layer.ln1.weight, 'f')
+            write_tensor(f"layer{i}.ln1", layer.ln1.weight, "f")
 
             # Attn
             # We need to grab the weights from BitLinear
             # Q, K, V, O
-            write_tensor(f"layer{i}.attn.q", layer.attn.q_proj.weight, 'b', True)
-            write_tensor(f"layer{i}.attn.k", layer.attn.k_proj.weight, 'b', True)
-            write_tensor(f"layer{i}.attn.v", layer.attn.v_proj.weight, 'b', True)
-            write_tensor(f"layer{i}.attn.o", layer.attn.o_proj.weight, 'b', True)
+            write_tensor(f"layer{i}.attn.q", layer.attn.q_proj.weight, "b", True)
+            write_tensor(f"layer{i}.attn.k", layer.attn.k_proj.weight, "b", True)
+            write_tensor(f"layer{i}.attn.v", layer.attn.v_proj.weight, "b", True)
+            write_tensor(f"layer{i}.attn.o", layer.attn.o_proj.weight, "b", True)
 
             # LN2
-            write_tensor(f"layer{i}.ln2", layer.ln2.weight, 'f')
+            write_tensor(f"layer{i}.ln2", layer.ln2.weight, "f")
 
             # MLP
-            write_tensor(f"layer{i}.mlp.fc1", layer.mlp.fc1.weight, 'b', True)
-            write_tensor(f"layer{i}.mlp.fc2", layer.mlp.fc2.weight, 'b', True)
+            write_tensor(f"layer{i}.mlp.fc1", layer.mlp.fc1.weight, "b", True)
+            write_tensor(f"layer{i}.mlp.fc2", layer.mlp.fc2.weight, "b", True)
 
         # 4. Final Norm
-        write_tensor("ln_f", model.ln_f.weight, 'f')
+        write_tensor("ln_f", model.ln_f.weight, "f")
 
         # 5. Head
-        write_tensor("head", model.head.weight, 'b', True)
+        write_tensor("head", model.head.weight, "b", True)
 
     print(f"Export complete. File size: {os.path.getsize(filename) / 1024:.2f} KB")
+
 
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Export Atomic-1Bit Model to C++ Binary")
-    parser.add_argument("--model", type=str, default="weights/final.pt", help="Path to .pt checkpoint")
-    parser.add_argument("--output", type=str, default="atomic_model.bin", help="Output binary file")
-    parser.add_argument("--prompt", type=str, default=None, help="System Prompt to bake into Gist (Optional)")
-    parser.add_argument("--gist_file", type=str, default=None, help="Path to pre-computed .gist file (Overrides prompt)")
+    parser = argparse.ArgumentParser(
+        description="Export Atomic-1Bit Model to C++ Binary"
+    )
+    parser.add_argument(
+        "--model", type=str, default="weights/final.pt", help="Path to .pt checkpoint"
+    )
+    parser.add_argument(
+        "--output", type=str, default="atomic_model.bin", help="Output binary file"
+    )
+    parser.add_argument(
+        "--prompt",
+        type=str,
+        default=None,
+        help="System Prompt to bake into Gist (Optional)",
+    )
+    parser.add_argument(
+        "--gist_file",
+        type=str,
+        default=None,
+        help="Path to pre-computed .gist file (Overrides prompt)",
+    )
     parser.add_argument("--dim", type=int, default=128, help="Model dimension")
     parser.add_argument("--depth", type=int, default=4, help="Model depth")
     parser.add_argument("--heads", type=int, default=4, help="Number of heads")
     parser.add_argument("--context_len", type=int, default=64, help="Context length")
     parser.add_argument("--vocab_size", type=int, default=2048, help="Vocab size")
-    parser.add_argument("--format_version", type=int, default=FORMAT_VERSION,
-                        choices=[2, FORMAT_VERSION],
-                        help="Binary format version (3 = int8 embeddings; 2 = fp32 embeddings, legacy)")
+    parser.add_argument(
+        "--format_version",
+        type=int,
+        default=FORMAT_VERSION,
+        choices=[2, FORMAT_VERSION],
+        help="Binary format version (3 = int8 embeddings; 2 = fp32 embeddings, legacy)",
+    )
 
     args = parser.parse_args()
 
@@ -232,7 +282,7 @@ if __name__ == "__main__":
         dim=args.dim,
         depth=args.depth,
         heads=args.heads,
-        context_length=args.context_len
+        context_length=args.context_len,
     )
 
     print(f"Initialized Model: Dim={args.dim}, Depth={args.depth}, Heads={args.heads}")
@@ -256,5 +306,10 @@ if __name__ == "__main__":
             print(f"Model file {args.model} not found. using random weights.")
 
     # Export
-    export_model(model, args.output, prompt=args.prompt, gist_file=args.gist_file,
-                 format_version=args.format_version)
+    export_model(
+        model,
+        args.output,
+        prompt=args.prompt,
+        gist_file=args.gist_file,
+        format_version=args.format_version,
+    )

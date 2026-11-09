@@ -1,10 +1,8 @@
+from unittest.mock import MagicMock, patch
+
 import psutil
-import pytest
-from unittest.mock import patch, MagicMock, PropertyMock
-import torch
 
 from atomic_1bit.utils.thermal import ThermalMonitor
-
 
 # On macOS, psutil.sensors_temperatures doesn't exist, so we need create=True
 PATCH_TARGET = "psutil.sensors_temperatures"
@@ -21,7 +19,9 @@ class TestThermalMonitorInit:
 
     def test_custom_thresholds(self):
         with patch(PATCH_TARGET, create=True, return_value={}):
-            monitor = ThermalMonitor(high_threshold=90.0, resume_threshold=75.0, check_interval_steps=100)
+            monitor = ThermalMonitor(
+                high_threshold=90.0, resume_threshold=75.0, check_interval_steps=100
+            )
         assert monitor.high == 90.0
         assert monitor.resume == 75.0
         assert monitor.interval == 100
@@ -55,7 +55,7 @@ class TestThermalMonitorCheck:
         monitor = ThermalMonitor(check_interval_steps=10)
         monitor.enabled = True
         # Step 5 is not a multiple of 10, should skip
-        with patch.object(monitor, '_get_max_temp') as mock_get:
+        with patch.object(monitor, "_get_max_temp") as mock_get:
             monitor.check_and_pause(step=5)
             mock_get.assert_not_called()
 

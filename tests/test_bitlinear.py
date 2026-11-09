@@ -1,6 +1,4 @@
-import pytest
 import torch
-import torch.nn as nn
 
 from atomic_1bit.nn.layers import BitLinear, activation_quant, weight_quant
 

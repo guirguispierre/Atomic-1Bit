@@ -4,9 +4,10 @@ End-to-end integration test for the Atomic-1Bit pipeline.
 Covers: model creation -> training -> checkpoint save -> export -> binary validation.
 Marked @pytest.mark.slow because it performs actual training steps.
 """
-import sys
+
 import os
 import struct
+import sys
 
 import pytest
 import torch
@@ -15,8 +16,8 @@ import torch.optim as optim
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from atomic_1bit.model.transformer import AtomicTransformer, AtomicConfig
-from atomic_1bit.utils.export_to_cpp import export_model
+from atomic_1bit.model.transformer import AtomicConfig, AtomicTransformer  # noqa: E402
+from atomic_1bit.utils.export_to_cpp import export_model  # noqa: E402
 
 # Smallest possible config for a fast e2e run
 E2E_CONFIG = AtomicConfig(
@@ -66,9 +67,9 @@ class TestE2EPipeline:
             losses.append(loss.item())
 
         # All loss values must be finite
-        assert all(torch.isfinite(torch.tensor(l)) for l in losses), (
-            f"Non-finite loss encountered: {losses}"
-        )
+        assert all(
+            torch.isfinite(torch.tensor(loss_val)) for loss_val in losses
+        ), f"Non-finite loss encountered: {losses}"
 
     def test_checkpoint_save_and_load(self, tmp_path):
         """Checkpoint saved to disk should reload without errors."""
@@ -142,9 +143,9 @@ class TestE2EPipeline:
         with open(str(bin_path), "rb") as f:
             (magic,) = struct.unpack("i", f.read(4))
 
-        assert magic == ATOM_MAGIC, (
-            f"Expected magic 0x{ATOM_MAGIC:08X}, got 0x{magic:08X}"
-        )
+        assert (
+            magic == ATOM_MAGIC
+        ), f"Expected magic 0x{ATOM_MAGIC:08X}, got 0x{magic:08X}"
 
     def test_export_binary_version(self, tmp_path):
         """Exported binary header version field must equal 3."""

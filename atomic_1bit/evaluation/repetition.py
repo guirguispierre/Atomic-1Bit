@@ -1,6 +1,3 @@
-from collections import Counter
-
-
 def calculate_repetition_rate(text, n=3):
     """
     Measure n-gram repetition rate in generated text.
@@ -16,7 +13,7 @@ def calculate_repetition_rate(text, n=3):
     if len(tokens) < n:
         return 0.0
 
-    ngrams = [tuple(tokens[i:i+n]) for i in range(len(tokens) - n + 1)]
+    ngrams = [tuple(tokens[i : i + n]) for i in range(len(tokens) - n + 1)]
     unique_ngrams = set(ngrams)
 
     if len(ngrams) == 0:

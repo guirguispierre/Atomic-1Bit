@@ -9,15 +9,18 @@ import torch.nn as nn
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from atomic_1bit.model.transformer import AtomicTransformer, AtomicConfig
-from atomic_1bit.utils.export_to_cpp import export_model
+from atomic_1bit.model.transformer import (  # noqa: E402
+    AtomicConfig,
+    AtomicTransformer,
+)
+from atomic_1bit.utils.export_to_cpp import export_model  # noqa: E402
 
 RUNNER = os.path.join(os.path.dirname(__file__), "..", "embedded", "runner")
 
 pytestmark = pytest.mark.skipif(
     not os.path.exists(RUNNER),
     reason="C++ runner not built (cd embedded && g++ -O3 -std=c++17 "
-           "atomic_runner.cpp -o runner)",
+    "atomic_runner.cpp -o runner)",
 )
 
 CFG = AtomicConfig(vocab_size=256, dim=64, depth=4, heads=4, context_length=32)
@@ -31,7 +34,9 @@ AGREEMENT_TOL = 5e-2
 def _run_runner(model_bin, *args):
     return subprocess.run(
         [RUNNER, "--model", str(model_bin), *args],
-        capture_output=True, text=True, timeout=120,
+        capture_output=True,
+        text=True,
+        timeout=120,
     )
 
 
@@ -39,16 +44,17 @@ def _generated_tokens(res, n_prompt=1):
     body = res.stdout.split("Generating:", 1)[1].split("Done.")[0]
     fields = body.split()
     for tok in fields:
-        assert tok.lstrip("-").isdigit(), (
-            f"non-numeric token {tok!r} in generation stream: {body!r}"
-        )
+        assert tok.lstrip(
+            "-"
+        ).isdigit(), f"non-numeric token {tok!r} in generation stream: {body!r}"
     # guirguispierre 2026-08-10 - runner echoes the prompt before generating
     return [int(t) for t in fields[n_prompt:]]
 
 
 def _cpp_logits(model_bin, start_token):
-    res = _run_runner(model_bin, "--parity", "--temp", "0",
-                      "--start_token", str(start_token))
+    res = _run_runner(
+        model_bin, "--parity", "--temp", "0", "--start_token", str(start_token)
+    )
     for line in res.stdout.splitlines():
         if line.startswith("[Final_Logits]"):
             vals = line.split("] n=", 1)[1].split()[1:]
@@ -95,8 +101,7 @@ class TestActivationContract:
 class TestCppRuntimeParity:
     def test_output_stream_is_not_polluted(self, exported):
         _, path = exported
-        res = _run_runner(path, "--steps", "8", "--temp", "0",
-                          "--start_token", "7")
+        res = _run_runner(path, "--steps", "8", "--temp", "0", "--start_token", "7")
         tokens = _generated_tokens(res)
         assert len(tokens) == 8, f"expected 8 generated tokens, got {tokens!r}"
 
@@ -142,8 +147,7 @@ class TestLegacyV2Format:
         path = tmp_path / "model_v2.bin"
         export_model(model, str(path), format_version=2)
 
-        res = _run_runner(path, "--steps", "8", "--temp", "0",
-                          "--start_token", "7")
+        res = _run_runner(path, "--steps", "8", "--temp", "0", "--start_token", "7")
         assert res.returncode == 0, (
             f"v2 model failed to load.\nstdout:\n{res.stdout[-2000:]}\n"
             f"stderr:\n{res.stderr[-2000:]}"
@@ -175,20 +179,21 @@ class TestLegacyV2Format:
         header = struct.pack("iiiiiiii", 0x41544F4D, 99, 256, 64, 4, 4, 32, 0)
         path.write_bytes(header + b"\x00" * 256)
 
-        res = _run_runner(path, "--steps", "1", "--temp", "0",
-                          "--start_token", "7")
+        res = _run_runner(path, "--steps", "1", "--temp", "0", "--start_token", "7")
         assert res.returncode != 0
         assert "Unsupported version" in res.stderr
 
 
 class TestRunnerCLI:
     def test_help_exits_cleanly(self):
-        res = subprocess.run([RUNNER, "--help"], capture_output=True,
-                             text=True, timeout=60)
+        res = subprocess.run(
+            [RUNNER, "--help"], capture_output=True, text=True, timeout=60
+        )
         assert res.returncode == 0
         assert "--model" in res.stdout and "--steps" in res.stdout
 
     def test_unknown_flag_is_rejected(self):
-        res = subprocess.run([RUNNER, "--not-a-flag"], capture_output=True,
-                             text=True, timeout=60)
+        res = subprocess.run(
+            [RUNNER, "--not-a-flag"], capture_output=True, text=True, timeout=60
+        )
         assert res.returncode != 0

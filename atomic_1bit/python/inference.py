@@ -1,18 +1,20 @@
-import numpy as np
 import time
+
+import numpy as np
 from wrapper import ternary_matmul
+
 
 def run_verification(M, N, K, verbose=False):
     print(f"\n--- Verification: M={M}, N={N}, K={K} ---")
-    
+
     # 1. Generate Dummy Data
     # Activations: Random INT8
     A = np.random.randint(-127, 128, size=(M, K), dtype=np.int8)
-    
+
     # Weights: Random ternary {-1, 0, 1}
     raw = np.random.randint(0, 3, size=(K, N), dtype=np.int8)
     B = raw - 1
-    
+
     # 2. Run Atomic Kernel
     try:
         start_t = time.time()
@@ -28,7 +30,7 @@ def run_verification(M, N, K, verbose=False):
     C_ref = np.dot(A.astype(np.int32), B.astype(np.int32))
     end_ref = time.time()
     print(f"Reference Numpy Time: {(end_ref - start_ref)*1000:.4f} ms")
-    
+
     # Debug Prints
     if verbose:
         print("\n[DEBUG] First Row Inputs A[0, :8]:", A[0, :8])
@@ -47,6 +49,7 @@ def run_verification(M, N, K, verbose=False):
         print(f"Mean diff: {np.mean(diff)}")
         return False
 
+
 def run_demo():
     # 1. Tiny Sanity Check
     if not run_verification(M=1, N=8, K=16, verbose=True):
@@ -56,6 +59,7 @@ def run_demo():
     # 2. Large Scale
     print("\n--- Running Large Scale System Check ---")
     run_verification(M=1, N=4096, K=4096)
+
 
 if __name__ == "__main__":
     run_demo()

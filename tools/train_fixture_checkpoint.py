@@ -18,6 +18,7 @@ Usage:
     python3 tools/train_fixture_checkpoint.py [--steps 2000] [--batch-size 32]
         [--out checkpoints/tiny_stories.pt] [--seed 0]
 """
+
 import argparse
 import json
 import os
@@ -27,12 +28,15 @@ from collections import Counter
 
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
-import numpy as np
-import torch
-import torch.nn.functional as F
-import torch.optim as optim
+import numpy as np  # noqa: E402
+import torch  # noqa: E402
+import torch.nn.functional as F  # noqa: E402
+import torch.optim as optim  # noqa: E402
 
-from atomic_1bit.model.transformer import AtomicTransformer, AtomicConfig
+from atomic_1bit.model.transformer import (  # noqa: E402
+    AtomicConfig,
+    AtomicTransformer,
+)
 
 # --- Fixture config: matches benchmarks/run_suite.py and train_tiny.py ---
 VOCAB_SIZE = 2048
@@ -53,14 +57,14 @@ def load_training_texts(n_stories, seed):
     try:
         from datasets import load_dataset
 
-        train = load_dataset(
-            "roneneldan/TinyStories", split=f"train[:{n_stories}]"
-        )
+        train = load_dataset("roneneldan/TinyStories", split=f"train[:{n_stories}]")
         val = load_dataset("roneneldan/TinyStories", split="validation[:1000]")
         return list(train["text"]), list(val["text"]), "tinystories-hf"
     except Exception as e:  # offline / rate-limited / dataset schema change
-        print(f"[data] TinyStories unavailable ({e}); "
-              f"using the deterministic local corpus instead")
+        print(
+            f"[data] TinyStories unavailable ({e}); "
+            f"using the deterministic local corpus instead"
+        )
         rng = np.random.RandomState(seed)
         names = ["Lily", "Tom", "Ben", "Anna", "Max", "Sara", "Jack", "Ella"]
         things = ["ball", "cat", "dog", "kite", "book", "cake", "boat", "bird"]
@@ -71,17 +75,19 @@ def load_training_texts(n_stories, seed):
             "One day, {n} went to the {p} with a {t}. They {a} all day.",
             "{n} had a little {t}. The {t} liked to {a} in the {p}.",
             "There was a {t} named Spot. {n} and the {t} went to the {p}.",
-            "{n} said, \"Look at my {t}!\" Then they {a} in the {p}.",
+            '{n} said, "Look at my {t}!" Then they {a} in the {p}.',
         ]
         texts = []
         for i in range(n_stories):
             t = tmpl[rng.randint(len(tmpl))]
-            texts.append(t.format(
-                n=names[rng.randint(len(names))],
-                t=things[rng.randint(len(things))],
-                p=places[rng.randint(len(places))],
-                a=acts[rng.randint(len(acts))],
-            ))
+            texts.append(
+                t.format(
+                    n=names[rng.randint(len(names))],
+                    t=things[rng.randint(len(things))],
+                    p=places[rng.randint(len(places))],
+                    a=acts[rng.randint(len(acts))],
+                )
+            )
         # deterministic split: last 10% held out
         n_eval = max(1, len(texts) // 10)
         return texts[:-n_eval], texts[-n_eval:], "local-template-fallback"
@@ -139,20 +145,27 @@ def main():
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--stories", type=int, default=20000,
-                   help="TinyStories train slice size")
-    p.add_argument("--vocab-scan", type=int, default=3000,
-                   help="stories scanned to build the frequency vocab")
+    p.add_argument(
+        "--stories", type=int, default=20000, help="TinyStories train slice size"
+    )
+    p.add_argument(
+        "--vocab-scan",
+        type=int,
+        default=3000,
+        help="stories scanned to build the frequency vocab",
+    )
     p.add_argument("--eval-batches", type=int, default=64)
     p.add_argument("--out", default="checkpoints/tiny_stories.pt")
-    p.add_argument("--vocab-out", default=None,
-                   help="default: <out minus .pt>_vocab.json")
+    p.add_argument(
+        "--vocab-out", default=None, help="default: <out minus .pt>_vocab.json"
+    )
     args = p.parse_args()
 
     torch.manual_seed(args.seed)
     rng = np.random.RandomState(args.seed)
 
     import tiktoken
+
     enc = tiktoken.get_encoding("gpt2")
 
     t0 = time.time()
@@ -165,19 +178,34 @@ def main():
     train_ids = encode_stories(train_texts, enc, token_map, CONTEXT_LEN)
     eval_ids = encode_stories(eval_texts, enc, token_map, CONTEXT_LEN)
 
-    config = AtomicConfig(vocab_size=VOCAB_SIZE, dim=DIM, depth=DEPTH,
-                          heads=HEADS, context_length=CONTEXT_LEN)
+    config = AtomicConfig(
+        vocab_size=VOCAB_SIZE,
+        dim=DIM,
+        depth=DEPTH,
+        heads=HEADS,
+        context_length=CONTEXT_LEN,
+    )
     model = AtomicTransformer(config)
     n_params = sum(q.numel() for q in model.parameters())
-    print(f"[model] {n_params:,} params "
-          f"(vocab={VOCAB_SIZE} dim={DIM} depth={DEPTH} heads={HEADS} ctx={CONTEXT_LEN})")
+    print(
+        f"[model] {n_params:,} params "
+        f"(vocab={VOCAB_SIZE} dim={DIM} depth={DEPTH} heads={HEADS} ctx={CONTEXT_LEN})"
+    )
 
     opt = optim.AdamW(model.parameters(), lr=args.lr)
 
-    nll0 = mean_nll(model, eval_ids, VOCAB_SIZE, args.eval_batches // 4,
-                    args.batch_size, np.random.RandomState(args.seed + 1))
-    print(f"[eval] untrained held-out NLL {nll0:.4f} "
-          f"(ppl {np.exp(nll0):.1f}; uniform = {VOCAB_SIZE})")
+    nll0 = mean_nll(
+        model,
+        eval_ids,
+        VOCAB_SIZE,
+        args.eval_batches // 4,
+        args.batch_size,
+        np.random.RandomState(args.seed + 1),
+    )
+    print(
+        f"[eval] untrained held-out NLL {nll0:.4f} "
+        f"(ppl {np.exp(nll0):.1f}; uniform = {VOCAB_SIZE})"
+    )
 
     model.train()
     t_train = time.time()
@@ -196,8 +224,10 @@ def main():
 
         if step % 100 == 0 or step == args.steps - 1:
             avg = np.mean(losses[-100:])
-            print(f"[train] step {step}/{args.steps} "
-                  f"loss {loss.item():.4f} avg100 {avg:.4f}")
+            print(
+                f"[train] step {step}/{args.steps} "
+                f"loss {loss.item():.4f} avg100 {avg:.4f}"
+            )
     train_s = time.time() - t_train
     final_loss = float(np.mean(losses[-100:]))
 
@@ -206,17 +236,28 @@ def main():
     fp16_sd = {k: v.detach().half().clone() for k, v in model.state_dict().items()}
     model_fp16 = AtomicTransformer(config)
     model_fp16.load_state_dict(fp16_sd)
-    nll = mean_nll(model_fp16, eval_ids, VOCAB_SIZE, args.eval_batches,
-                   args.batch_size, np.random.RandomState(args.seed + 1))
+    nll = mean_nll(
+        model_fp16,
+        eval_ids,
+        VOCAB_SIZE,
+        args.eval_batches,
+        args.batch_size,
+        np.random.RandomState(args.seed + 1),
+    )
     ppl = float(np.exp(nll))
-    print(f"[eval] held-out NLL {nll:.4f} -> perplexity {ppl:.1f} "
-          f"(uniform = {VOCAB_SIZE})")
+    print(
+        f"[eval] held-out NLL {nll:.4f} -> perplexity {ppl:.1f} "
+        f"(uniform = {VOCAB_SIZE})"
+    )
 
     ckpt = {
         "step": args.steps,
         "config": {
-            "vocab_size": VOCAB_SIZE, "dim": DIM, "depth": DEPTH,
-            "heads": HEADS, "context_length": CONTEXT_LEN,
+            "vocab_size": VOCAB_SIZE,
+            "dim": DIM,
+            "depth": DEPTH,
+            "heads": HEADS,
+            "context_length": CONTEXT_LEN,
         },
         "model_state_dict": fp16_sd,
         "training": {
@@ -245,9 +286,11 @@ def main():
         json.dump({"token_map": token_map, "reverse_map": reverse_map}, f)
     print(f"[save] {vocab_path}")
 
-    print(f"[done] total {time.time() - t0:.0f}s "
-          f"(train {train_s:.0f}s) | final loss {final_loss:.4f} | "
-          f"held-out ppl {ppl:.1f} vs uniform {VOCAB_SIZE}")
+    print(
+        f"[done] total {time.time() - t0:.0f}s "
+        f"(train {train_s:.0f}s) | final loss {final_loss:.4f} | "
+        f"held-out ppl {ppl:.1f} vs uniform {VOCAB_SIZE}"
+    )
 
 
 if __name__ == "__main__":

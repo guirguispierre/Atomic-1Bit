@@ -88,7 +88,8 @@ Loads a binary model file produced by `atomic_1bit/utils/export_to_cpp.py` into 
 ### `forward`
 
 ```cpp
-inline void forward(AtomicModel &model, const vector<int> &tokens, vector<float> &logits);
+inline void forward(AtomicModel &model, const vector<int> &tokens,
+                    vector<float> &logits, KVCache *cache = nullptr);
 ```
 
 Runs a full forward pass of the model on the given token sequence and writes next-token logits into `logits`.
@@ -97,11 +98,12 @@ Runs a full forward pass of the model on the given token sequence and writes nex
 - `model` — A fully loaded `AtomicModel`.
 - `tokens` — Input token IDs as a sequence of integers. If the model has `has_gist == 1`, the Gist vector is prepended automatically, consuming one position of the context window.
 - `logits` — Output buffer of size `model.config.vocab_size`. Must be pre-allocated by the caller before calling.
+- `cache` — Optional `KVCache`. When non-null, every layer's K/V rows are copied into it during the pass and `cache->len` ends at the sequence length, so generation can continue with `forward_one` instead of re-running the prefix. The cache is (re)initialized automatically if its dimensions do not match the model.
 
 **Returns:** `void`. Returns immediately without writing to `logits` if the effective sequence length (including the Gist token if present) exceeds `config.max_seq_len`.
 
 **Computation performed:**
-1. Embed each token as `token_emb[id] + pos_emb[position]`.
+1. Embed each token as `token_emb[id] + pos_emb[position]`, where `position` is the absolute stream index (token `i` sits at index `i`, or `i + 1` when a Gist occupies slot 0).
 2. For each transformer layer: pre-norm (RMSNorm), multi-head attention with causal masking, residual add, pre-norm (RMSNorm), MLP with GELU activation, residual add.
 3. Apply final RMSNorm to the last token's hidden state.
 4. Project to vocabulary via `bit_linear` using `head_w`.
@@ -110,10 +112,50 @@ Runs a full forward pass of the model on the given token sequence and writes nex
 
 ---
 
+### `KVCache`
+
+```cpp
+struct KVCache {
+    vector<float> K;   // [layer][pos][dim]
+    vector<float> V;
+    int len = -1;      // valid positions; -1 = empty/stale
+    int depth, max_seq_len, dim;
+    void init(int depth, int max_seq_len, int dim);
+    float *k_row(int layer, int pos);
+    float *v_row(int layer, int pos);
+};
+```
+
+Per-layer key/value cache holding one `dim` row per position per layer, sized for `config.max_seq_len` positions. `len` is the number of valid (contiguous, from position 0) rows.
+
+Typical usage: pass it to `forward` during prefill, then call `forward_one` per generated token. When the context window slides, learned position embeddings are rebased and every cached row goes stale — set `cache.len = -1` and refill via `forward` on the truncated context.
+
+---
+
+### `forward_one`
+
+```cpp
+inline bool forward_one(AtomicModel &model, int token,
+                        vector<float> &logits, KVCache &cache);
+```
+
+Decodes a single token at stream position `cache.len`, appending its K/V rows at every layer. Produces **bit-identical** logits to running `forward` on the whole context — it performs the same operations in the same order for the new row.
+
+**Returns:** `true` on success. `false` when the cache is stale (`len < 0`), full (`len >= max_seq_len`), dimensionally mismatched, or `token` is out of vocab range — refill with `forward` in that case.
+
+**Parameters:**
+- `model` — A fully loaded `AtomicModel`.
+- `token` — The token ID at position `cache.len` (usually the last context token or the previously generated one).
+- `logits` — Output buffer of size `model.config.vocab_size`.
+- `cache` — A `KVCache` previously filled by `forward`.
+
+---
+
 ### `bit_linear`
 
 ```cpp
-inline void bit_linear(const vector<float> &x, const vector<int8_t> &w, vector<float> &out);
+inline void bit_linear(const vector<float> &x, const vector<int8_t> &w,
+                       float scale_w, vector<float> &out);
 ```
 
 Core BitLinear compute kernel. Implements one linear layer of the form: quantize input, integer matrix-multiply against ternary weight, dequantize output.
@@ -121,12 +163,14 @@ Core BitLinear compute kernel. Implements one linear layer of the form: quantize
 **Parameters:**
 - `x` — Float input vector of size `in_dim`.
 - `w` — Ternary weight matrix, flattened as `[in_dim, out_dim]` in row-major order (i.e., `w[i * out_dim + o]`). Values must be in `{-1, 0, 1}`.
+- `scale_w` — Per-tensor `float32` weight scale read from the binary.
 - `out` — Output vector. Must be pre-allocated to size `out_dim`.
 
 **Quantization steps:**
-1. AbsMax scaling: `scale = 127 / max(|x|, 1e-5)`, clamp to INT8 range `[-127, 127]`.
-2. Integer accumulation: `acc[o] += x_q[i] * w[i * out_dim + o]` (uses actual `int32_t` multiplication; no branch-on-sign optimization at this layer).
-3. Dequantize: `out[o] = acc[o] / scale`.
+1. SubLN: compute `rms = sqrt(mean(x^2) + 1e-5)`; the effective input is `x / rms`.
+2. AbsMax scaling of the normalized input: `scale_x = 127 / max(|x| / rms, 1e-5)`; quantize `roundf(x_i / rms * scale_x)` clamped to `[-127, 127]`.
+3. Integer accumulation: `acc[o] += x_q[i] * w[i * out_dim + o]` in `int32` (zero activations skip the whole row).
+4. Dequantize: `out[o] = acc[o] * (scale_w / scale_x)`.
 
 Per-tensor `float32` weight scales are read from the binary and applied during dequantization, matching the Python `BitLinear` forward. `atomic_lib.h` and `atomic_runner.cpp` now consume the identical format written by `export_to_cpp.py`.
 
@@ -195,12 +239,27 @@ int main() {
     std::vector<int> context = {42};
 
     std::vector<float> logits(model.config.vocab_size);
+    KVCache cache;
+    int t_off = model.config.has_gist ? 1 : 0;
+    int ctx_cap = model.config.max_seq_len - t_off;
 
-    // Greedy decode loop
+    // Greedy decode loop: full forward on the prompt, one cached step per
+    // generated token after that
     for (int step = 0; step < 50; ++step) {
-        if ((int)context.size() >= model.config.max_seq_len) break;
+        if ((int)context.size() > ctx_cap) {
+            // Window is full: slide it, then rebuild -- learned positions are
+            // rebased, so cached rows are stale either way
+            int keep = ctx_cap - ctx_cap / 4;
+            context.erase(context.begin(),
+                          context.begin() + ((int)context.size() - keep));
+            cache.len = -1;
+        }
 
-        forward(model, context, logits);
+        if (cache.len == (int)context.size() - 1 + t_off) {
+            if (!forward_one(model, context.back(), logits, cache)) break;
+        } else {
+            forward(model, context, logits, &cache);
+        }
 
         // Pick the highest-scoring token
         int best = 0;

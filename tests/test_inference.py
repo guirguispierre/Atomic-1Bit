@@ -1,8 +1,7 @@
-import pytest
 import torch
 import torch.nn.functional as F
 
-from atomic_1bit.model.transformer import AtomicTransformer, AtomicConfig
+from atomic_1bit.model.transformer import AtomicTransformer
 
 
 class TestEndToEndInference:

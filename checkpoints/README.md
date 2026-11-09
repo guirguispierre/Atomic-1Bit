@@ -32,12 +32,23 @@ output through it. If TinyStories cannot be downloaded the script falls
 back to a deterministic local corpus and says so in its output and in the
 checkpoint metadata (`training.dataset`).
 
+`tiny_stories.vocab` is the detokenizer file for the C++ runner's `--vocab`
+flag -- one line per model token id holding the lowercase hex of its raw
+bytes (regenerate with `tools/make_vocab.py`). With it the runner prints
+decoded text instead of bare ids:
+
+```bash
+./embedded/runner --model trained.bin --vocab checkpoints/tiny_stories.vocab
+```
+
 ## What consumes it
 
 - `python3 tools/parity_check.py` -- exports it to `.bin`, runs the C++
   runner's `--parity` dump, and compares every probe numerically.
 - `tests/test_trained_parity.py` -- same check under pytest, plus a
   trained-not-random gate.
+- `tests/test_runner_cli.py` -- exercises `--vocab` against
+  `tiny_stories.vocab` end to end.
 - `benchmarks/run_suite.py` loads a bare state dict from
   `weights/benchmark_model.pt` at this exact config; adapt with
   `torch.save(torch.load("checkpoints/tiny_stories.pt")["model_state_dict"],

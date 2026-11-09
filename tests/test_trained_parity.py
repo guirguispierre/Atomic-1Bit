@@ -19,7 +19,7 @@ import torch.nn.functional as F
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
 
-import parity_check as pc
+import parity_check as pc  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CHECKPOINT = os.path.join(ROOT, "checkpoints", "tiny_stories.pt")
@@ -58,26 +58,17 @@ def parity_report(tmp_path_factory):
 
 class TestTrainedParity:
     def test_every_probe_within_tolerance(self, parity_report):
-        # Warn band matching parity_check's verdict: probes drifting
-        # 1-4x tol are plausible platform quantization noise (x86 vs
-        # arm64 accumulation order); past 4x or a structural problem
-        # (missing/shape) is a real failure. Warn rows print, not fail.
-        rows = parity_report["rows"]
-        tol = parity_report["rel_tol"]
-        hard_fail = [
-            r
-            for r in rows
-            if r["status"] not in ("PASS", "FAIL") or r["max_rel"] > 4 * tol
+        # Match check_parity's verdict: WARN-band excursions (1-4x tol)
+        # are plausible platform quantization noise (x86 vs arm64
+        # accumulation order); only FAIL and structural rows fail the
+        # test. Warned rows still print in the report.
+        failed = [
+            r for r in parity_report["rows"] if r["status"] not in ("PASS", "WARN")
         ]
-        warned = [r for r in rows if r["status"] == "FAIL"]
-        if warned:
-            print(
-                "\nWARN-band probes (<=4x tol, not failing):\n"
-                + pc.format_report(warned, tol, PROMPT)
-            )
-        assert not hard_fail, (
-            "parity probes diverged beyond 4x tolerance "
-            f"{tol}:\n" + pc.format_report(hard_fail, tol, PROMPT)
+        assert not failed, (
+            "parity probes diverged beyond tolerance "
+            f"{parity_report['rel_tol']}:\n"
+            + pc.format_report(failed, parity_report["rel_tol"], PROMPT)
         )
 
     def test_greedy_next_token_agrees(self, parity_report):

@@ -286,7 +286,7 @@ void run_inference(vector<int> &tokens) {
     for (int i = 0; i < tokens.size(); ++i) {
         int id = tokens[i];
         for (int d = 0; d < dim; ++d)
-             X[(t_offset+i)*dim + d] = model.token_emb[id*dim+d] + model.pos_emb[i*dim+d];
+             X[(t_offset+i)*dim + d] = model.token_emb[id*dim+d] + model.pos_emb[(t_offset+i)*dim+d];
     }
 
     vector<float> X_norm(seq_len * dim);

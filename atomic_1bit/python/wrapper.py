@@ -1,6 +1,7 @@
 import ctypes
 import os
 import subprocess
+
 import numpy as np
 
 # Load the shared library
@@ -54,49 +55,50 @@ _lib = ctypes.CDLL(_LIB_PATH)
 _lib.ternary_matmul.argtypes = [
     ctypes.POINTER(ctypes.c_int8),  # A
     ctypes.POINTER(ctypes.c_int8),  # B
-    ctypes.POINTER(ctypes.c_int32), # C
-    ctypes.c_int, # M
-    ctypes.c_int, # N
-    ctypes.c_int  # K
+    ctypes.POINTER(ctypes.c_int32),  # C
+    ctypes.c_int,  # M
+    ctypes.c_int,  # N
+    ctypes.c_int,  # K
 ]
 _lib.ternary_matmul.restype = None
+
 
 def ternary_matmul(activations: np.ndarray, weights: np.ndarray) -> np.ndarray:
     """
     Executes the Atomic-1Bit Ternary Matmul Kernel.
-    
+
     Args:
         activations: INT8 numpy array of shape (M, K)
         weights: INT8 numpy array of shape (K, N) with values {-1, 0, 1}
-        
+
     Returns:
         INT32 numpy array of shape (M, N)
     """
     # Ensure inputs are contiguous C-style arrays of correct type
     A = np.ascontiguousarray(activations, dtype=np.int8)
-    
+
     # KERNEL FIX: The C++ kernel expects B to be (N, K) layout (Transposed).
     # We transpose here so the user can pass standard (K, N) weights.
     # Standard: (K, N). Transposed: (N, K).
     # We make it contiguous row-major (N, K) so kernel reads rows efficiently.
     B_transposed = weights.T
     B = np.ascontiguousarray(B_transposed, dtype=np.int8)
-    
+
     M, K = A.shape
-    N, K_w = B.shape # B is (N, K) now
-    
+    N, K_w = B.shape  # B is (N, K) now
+
     if K != K_w:
         raise ValueError(f"Shape mismatch: A({M},{K}) vs B({K_w},{N})")
-    
+
     # Pre-allocate output
     C = np.zeros((M, N), dtype=np.int32)
-    
+
     # Get pointers
     A_ptr = A.ctypes.data_as(ctypes.POINTER(ctypes.c_int8))
     B_ptr = B.ctypes.data_as(ctypes.POINTER(ctypes.c_int8))
     C_ptr = C.ctypes.data_as(ctypes.POINTER(ctypes.c_int32))
-    
+
     # Run Nucleus
     _lib.ternary_matmul(A_ptr, B_ptr, C_ptr, M, N, K)
-    
+
     return C

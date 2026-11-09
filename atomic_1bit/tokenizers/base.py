@@ -4,10 +4,11 @@ Unified tokenizer interface for Atomic-1Bit.
 Decouples the model from specific tokenizer implementations,
 making it easy to experiment with different vocabularies.
 """
+
 import json
 import os
-from typing import List
 from abc import ABC, abstractmethod
+from typing import List
 
 
 class AtomicTokenizer(ABC):
@@ -40,6 +41,7 @@ class TiktokenWrapper(AtomicTokenizer):
 
     def __init__(self, encoding_name: str = "gpt2"):
         import tiktoken
+
         self._enc = tiktoken.get_encoding(encoding_name)
 
     def encode(self, text: str) -> List[int]:
@@ -71,17 +73,20 @@ class PocketTokenizer(AtomicTokenizer):
             unk_id: Token ID for unknown tokens (defaults to vocab_size - 1)
         """
         import tiktoken
+
         self._enc = tiktoken.get_encoding("gpt2")
 
         if not os.path.exists(vocab_file):
             raise FileNotFoundError(f"Vocab file not found: {vocab_file}")
 
-        with open(vocab_file, 'r') as f:
+        with open(vocab_file, "r") as f:
             data = json.load(f)
 
         self._token_map = {int(k): v for k, v in data["token_map"].items()}
         self._reverse_map = {int(k): v for k, v in data["reverse_map"].items()}
-        self._vocab_size = max(self._reverse_map.keys()) + 2  # +1 for UNK, +1 for 0-indexed
+        self._vocab_size = (
+            max(self._reverse_map.keys()) + 2
+        )  # +1 for UNK, +1 for 0-indexed
         self._unk_id = unk_id if unk_id is not None else self._vocab_size - 1
 
     def encode(self, text: str) -> List[int]:

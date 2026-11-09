@@ -24,7 +24,7 @@ The result is a full transformer that runs on **integer arithmetic only**. No CU
 **This matters because:**
 - A 6.85M parameter model drops from **27.4 MB to 2.6 MB** (-91%)
 - The C++ runtime has **zero external dependencies** -- it's a single binary
-- It runs on a **Raspberry Pi**, an **ESP32**, or a **2015 laptop**
+- It targets a **Raspberry Pi**, an **ESP32**, or a **2015 laptop**
 - The ternary kernel is **bit-exact** against the NumPy reference, and the C++
   engine tracks the PyTorch model to float32 precision (see
   [Numerical parity](#numerical-parity))
@@ -35,27 +35,37 @@ The result is a full transformer that runs on **integer arithmetic only**. No CU
 
 ## Performance
 
-Benchmarked on Apple M-series, single thread, 50 generated tokens, using the
-Quick Start config below (256d, 6 layers, 4 heads, 4096 vocab, 6.85M params):
+Benchmarked on Apple M5 Pro (6 P-cores + 12 E-cores), 50 generated tokens,
+using the Quick Start config below (256d, 6 layers, 4 heads, 4096 vocab,
+6.85M params):
 
 | Metric | FP32 Baseline | Atomic-1Bit | Improvement |
 |:---|:---|:---|:---|
 | **Model Size** | 27.4 MB | **2.6 MB** | **-91%** |
 | **Parameters** | 6.85M | 6.85M | Same |
 | **Precision** | Float32 | Ternary {-1, 0, 1} | -- |
-| **Throughput (C++)** | N/A | **~3,300-3,500 TPS** | KV-cached decode |
+| **Throughput (C++)** | N/A | **~3,400 TPS (1 thread) / ~5,500 TPS (8 threads)** | KV-cached decode |
 
 The C++ runner keeps a per-layer KV cache during generation, so each decoded
 token costs a single-token forward pass instead of recomputing the full
 prefix: per-token cost is O(1) in the number of tokens already generated.
 Measured on the config above, throughput holds at ~3.1-3.5k TPS at both 50
-and 100 generated tokens, where the old recompute-everything path fell from
-~170 to ~83 TPS as the sequence grew. One honest caveat: positions are learned
-absolute embeddings, so once the sequence exceeds `context_length` the window
-slides, every cached position shifts, and the runner falls back to a full
-prefix recompute per step -- the old cost -- for the rest of the run. The
-Python path (`AtomicTransformer.generate`) caches the same way. Reproduce
-with `benchmarks/run_suite.py`.
+and 100 generated tokens single-threaded, where the old recompute-everything
+path fell from ~170 to ~83 TPS as the sequence grew. The runner also defaults
+to `--threads min(8, hardware_concurrency)`: a persistent pool splits each
+ternary matmul's output columns across workers (every output accumulator is
+an independent int32 sum, so output is bit-identical for any thread count).
+On this machine that lifts the config above to ~5.3-5.6k TPS at 4-8 threads;
+the smaller 128d/4L fixture model gains less (~13k -> ~15.5k TPS), and
+`--threads 1` keeps the exact serial path. One honest caveat: positions are
+learned absolute embeddings, so once the sequence exceeds `context_length`
+the window slides and every cached position is rebased, forcing a rebuild of
+the cached rows. The slide erases a quarter-window chunk, so the cost is one
+rebuild per `context_length/4` tokens rather than per token -- on the trained
+1.32M checkpoint that works out to 14.2k TPS inside the window and 5.6k TPS
+over a 200-step run that spends most of its steps past it. The Python path
+(`AtomicTransformer.generate`) caches the same way. Reproduce with
+`benchmarks/run_suite.py`.
 
 <details>
 <summary>Visual benchmarks</summary>
@@ -68,30 +78,32 @@ with `benchmarks/run_suite.py`.
 
 ### Quality baseline
 
-Size and speed numbers only matter if the model says something. Training the
-Quick Start config on TinyStories for 15k steps (about 25 minutes on an M-series
-laptop) gives:
+Size and speed numbers only matter if the model says something. The repo ships
+a small checked-in checkpoint (`checkpoints/tiny_stories.pt`, 1.32M params,
+2,000 TinyStories steps, ~2.5 min CPU) so every number below is reproducible
+out of the box:
 
 | Metric | Value |
 |:---|---:|
-| Held-out perplexity | **101.3** |
-| Uniform baseline (learned nothing) | 4096 |
-| Distinct trigram ratio | 0.98 |
-| 5-gram repetition rate | 0.00 |
+| Held-out perplexity | **115.5** |
+| Uniform baseline (learned nothing) | 2048 |
+| Distinct trigram ratio | 0.84 |
+| 5-gram repetition rate | 0.003 |
 
-Sampled from the C++ engine at `temp 0.8`, reading a 2.6 MB packed binary:
+Sampled from the C++ engine at `temp 0.9, seed 13`, reading a 533 KB packed
+binary (`--vocab checkpoints/tiny_stories.vocab`):
 
 ```
-One day, "Let, He would the king. "What, Ben?" "" ?" Ben said said, I said,
-"Let'm promise go to go and Tom. "Mom said, we look one more. It, "No the way.
+would day and Max gave walk child. bark ran, friends day was excited looked
+so She Ben to. in the".. wanted Joe to he her
 ```
 
-That is the honest state of it: the register, names and phrasing of TinyStories
-with local grammar, but it does not hold a sentence together, let alone a story.
-15k steps on 6.85M parameters buys a working pipeline and a number to improve
-against, not a good storyteller. Reproduce with `python3
-atomic_1bit/training/train.py`; checkpoints land in `weights/`, which is
-gitignored.
+That is the honest state of it: TinyStories words and fragments with local
+grammar, but not a story. The fixture exists so parity checks and quality
+evals run instantly -- `python3 tools/parity_check.py` -- and longer training
+on the bigger presets (`stories_base`, `flagship_12m`) is the path to better
+samples. Checkpoints produced by `python3 atomic_1bit/training/train.py` land
+in `weights/`, which is gitignored.
 
 ---
 
@@ -156,6 +168,11 @@ g++ -O3 -std=c++17 atomic_runner.cpp -o runner
 
 # Generate text
 ./runner --model atomic_model.bin --steps 100 --temp 0.7 --seed 42 --start_token 58
+
+# Or decode to real words with a .vocab file (tools/make_vocab.py);
+# the repo ships one for checkpoints/tiny_stories.pt
+./runner --model atomic_model.bin --steps 100 --temp 0.7 --seed 42 \
+  --vocab ../checkpoints/tiny_stories.vocab
 ```
 
 See [docs/COMMANDS.md](docs/COMMANDS.md) for the full command reference and [docs/INSTALL.md](docs/INSTALL.md) for detailed installation instructions.
@@ -276,7 +293,7 @@ config = config_to_atomic(load_config("configs/stories_base.yaml"))
 | PyYAML | >= 6.0 | Config files |
 | GCC/Clang | C++17 | C++ inference engine |
 
-**Hardware**: Any machine with a CPU. Apple Silicon recommended for Metal backend. NVIDIA GPU optional for CUDA backend. Tested down to ESP32-S3 for embedded inference.
+**Hardware**: Any machine with a CPU. Apple Silicon recommended for Metal backend. NVIDIA GPU optional for CUDA backend. ESP32 firmware compiles under PlatformIO (`esp32dev`); its on-device code is a loader/inference proof of concept, not a verified production port.
 
 ---
 

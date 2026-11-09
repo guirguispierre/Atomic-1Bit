@@ -26,7 +26,9 @@ def calculate_perplexity(model, dataset, vocab_size, device, num_samples=200):
             x, y = x.to(device), y.to(device)
 
             logits = model(x)
-            loss = F.cross_entropy(logits.view(-1, vocab_size), y.view(-1), reduction='sum')
+            loss = F.cross_entropy(
+                logits.view(-1, vocab_size), y.view(-1), reduction="sum"
+            )
             total_nll += loss.item()
             total_tokens += y.numel()
 

@@ -1,12 +1,16 @@
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <mutex>
 #include <random>
+#include <thread>
 #include <vector>
 
 using namespace std;
@@ -75,16 +79,275 @@ void rms_norm(const vector<float> &x, const vector<float> &weight,
   }
 }
 
-// Global Matmul for BitLinear
-// A: Float input [Dim]
-// Weight: Int8 [In, Out]
-// Out: Float output [Out]
-// Scratch: [In] (Pre-allocated buffer to avoid malloc)
-void bit_linear(const vector<float> &x, const TensorI8 &w, vector<float> &out,
-                vector<int8_t> &scratch, vector<int32_t> &acc32) {
-  int in_dim = w.rows;
-  int out_dim = w.cols;
+// --- Decode thread pool ---
+//
+// --threads N > 1 splits a matmul job's OUTPUT columns across N-1 persistent
+// workers plus the calling thread. A job is one part (bit_linear) or several
+// parts sharing one quantized input (fused Q/K/V: one sync instead of three).
+// Each acc[j] is an independent int32 sum over the whole input dim, so any
+// partition of columns is bit-identical to the serial loop: integer adds are
+// exact under partitioning (and each claim even keeps the serial i-order).
+// The float dequant runs once per output element after accumulation, exactly
+// as in the serial path.
+//
+// Work is claimed dynamically in CHUNK-column pieces off an atomic counter:
+// on heterogeneous cores (P+E) a slow worker simply takes fewer chunks, so
+// the job finishes when the fast cores run out of work rather than when the
+// slowest static slice finishes.
+//
+// Sync: jobs alternate between two slots. A slot's claim counter `next`
+// packs (tag << 20 | chunk index); a pull is only honored when its tag
+// matches the slot's committed tag. The caller commits tag -> fields ->
+// next in that order, so a tag-matching pull is proof the whole job
+// descriptor is visible; stale pulls (old tag, or index beyond the current
+// job) are discarded. Workers are purely opportunistic: run() waits only
+// for chunks_done == nchunks, never for worker acks, so a preempted or
+// parked worker can never stall a call -- the caller just does the chunks
+// itself. run() only returns once every claimed chunk is done, so no worker
+// can still be inside run_range when its slot's fields are rewritten two
+// jobs later.
+//
+// Worker idle sync is a spin-then-park hybrid sized for microsecond tasks:
+// workers spin on the job sequence (decode gaps between jobs are
+// single-digit us), then park on a condvar so idle stretches burn nothing.
+// The pool exists only when --threads > 1; the serial path keeps zero
+// atomics in its inner loop.
+struct LinearPool {
+  int nthreads = 1; // total participants including the calling thread
+  vector<thread> workers;
 
+  // Columns per work claim. 256 int32 accs = 1KB per claim; acc is
+  // 128B-aligned so a claim never shares a cache line with its neighbor
+  // (see bit_linear). Measured better than 64/128: fewer atomic pulls and
+  // longer vectorized runs per claim, and each fused part still splits.
+  static constexpr int CHUNK = 256;
+  static constexpr int MAX_PARTS = 20; // fused projections + in-dim splits
+  static constexpr int IDX_MASK = 0xfffff; // 20-bit claim index in `next`
+
+  // A part is one output tensor; its columns live at [col0, col0+width) in
+  // job space and acc[] is indexed in the same job space. A part may also
+  // cover only rows [in0, in0+in_len) of the weight (input-dim split): then
+  // out == nullptr and its acc range holds a partial sum, reduced by the
+  // caller after the join -- still exact int32 math.
+  struct Part {
+    const int8_t *w;
+    float *out;
+    float w_scale;
+    int width;
+    int col0;
+    int in0;
+    int in_len;
+  };
+
+  struct alignas(128) Slot {
+    // `tag` is written first and `next` committed last, so a pull carrying
+    // the current tag proves the fields below are fully published.
+    atomic<uint32_t> tag{0};
+    atomic<int> chunks_done{0};
+    Part parts[MAX_PARTS];
+    int nparts = 0;
+    const int8_t *x_q = nullptr;
+    int32_t *acc = nullptr;
+    int in_dim = 0, total_cols = 0;
+    float quant_scale = 1.0f;
+    int nchunks = 0;
+    // Set for input-dim-split jobs: after the join the caller reduces the
+    // nparts partial acc regions into out (exact integer add).
+    float *reduce_out = nullptr;
+    int reduce_width = 0;
+    alignas(128) atomic<uint64_t> next{0};
+  };
+  Slot slots[2];
+
+  // The wake signal gets its own line: workers spin-read it constantly.
+  alignas(128) atomic<uint64_t> seq{0}; // jobs published
+  atomic<int> parked{0};
+  atomic<bool> stop{false};
+  mutex mtx;
+  condition_variable cv;
+
+  // Idle spin before parking (~1ms): decode gaps between jobs are us-scale.
+  static constexpr int SPIN_ITERS = 400000;
+  // Bound a drain's wasted pulls: while a slot is mid-publish its counter
+  // can briefly hand out stale-tag indices.
+  static constexpr int MAX_PULLS = 1 << 20;
+
+  // Column-count gate for taking a job parallel: below this the serial
+  // kernel is only a few us and waking the pool costs more than it saves.
+  // 512 measured as the crossover on Apple Silicon at any thread count.
+  int min_cols = 512;
+  bool in_split_ok = false;
+
+  void start(int n) {
+    nthreads = n;
+    min_cols = 512;
+    in_split_ok = (n >= 2);
+    for (int i = 1; i < n; ++i)
+      workers.emplace_back([this] { worker_loop(); });
+  }
+
+  ~LinearPool() {
+    stop.store(true);
+    {
+      lock_guard<mutex> lk(mtx);
+      cv.notify_all();
+    }
+    for (auto &t : workers)
+      if (t.joinable())
+        t.join();
+  }
+
+  // Kernel for one claimed job-column range: identical arithmetic to the
+  // serial kernel below, restricted to [c0, c1) and routed per part.
+  void run_range(const Slot &S, int c0, int c1) {
+    // Snapshot every field to a local first: acc[] stores are int32_t and
+    // may alias the int members of the job, so member loads in the inner
+    // loop can't be hoisted -- locals can.
+    int32_t *acc_g = S.acc;
+    const int8_t *xq = S.x_q;
+    int np = S.nparts;
+    float qs = S.quant_scale;
+    for (int p = 0; p < np; ++p) {
+      const int8_t *pw = S.parts[p].w;
+      float *pout = S.parts[p].out;
+      float ws = S.parts[p].w_scale;
+      int width = S.parts[p].width;
+      int col0 = S.parts[p].col0;
+      int j0 = max(c0, col0), j1 = min(c1, col0 + width);
+      if (j0 >= j1)
+        continue;
+      int i0 = S.parts[p].in0, ilen = S.parts[p].in_len;
+      int32_t *acc_p = acc_g + col0;
+      int lj0 = j0 - col0, lj1 = j1 - col0;
+      for (int lj = lj0; lj < lj1; ++lj)
+        acc_p[lj] = 0;
+      for (int i = i0; i < i0 + ilen; ++i) {
+        int32_t xv = xq[i];
+        if (xv == 0)
+          continue;
+        const int8_t *wrow = pw + (size_t)i * width;
+        for (int lj = lj0; lj < lj1; ++lj)
+          acc_p[lj] += wrow[lj] * xv;
+      }
+      if (pout == nullptr)
+        continue; // partial acc region: caller reduces after the join
+      for (int lj = lj0; lj < lj1; ++lj)
+        pout[lj] = ((float)acc_p[lj] / qs) * ws;
+    }
+  }
+
+  // Caller and workers both pull chunks until the slot's counter is
+  // exhausted. Stale-tag pulls are discarded; they can only come from the
+  // previous (already complete) job on this slot.
+  void drain(Slot &S) {
+    uint32_t stag;
+    for (int pulls = 0; pulls < MAX_PULLS; ++pulls) {
+      if (stop.load(memory_order_acquire))
+        return;
+      uint64_t v = S.next.fetch_add(1, memory_order_acquire);
+      uint32_t vt = (uint32_t)(v >> 20);
+      stag = S.tag.load(memory_order_acquire);
+      if (vt != stag)
+        continue;
+      int idx = (int)(v & IDX_MASK);
+      if (idx >= S.nchunks)
+        break;
+      run_range(S, idx * CHUNK, min(idx * CHUNK + CHUNK, S.total_cols));
+      S.chunks_done.fetch_add(1, memory_order_release);
+    }
+  }
+
+  void worker_loop() {
+    uint64_t seen = 0;
+    int spins = 0;
+    for (;;) {
+      uint64_t e = seq.load(memory_order_acquire);
+      if (e != seen) {
+        seen = e;
+        drain(slots[e & 1]);
+        spins = 0;
+        continue;
+      }
+      if (stop.load(memory_order_acquire))
+        return;
+      if (++spins < SPIN_ITERS)
+        continue;
+      // Park. The predicate re-checks seq under the lock and the caller
+      // notifies while holding the same lock whenever parked>0, so a wake
+      // can never be missed.
+      {
+        unique_lock<mutex> lk(mtx);
+        parked.fetch_add(1);
+        cv.wait(lk, [&] {
+          return seq.load(memory_order_acquire) != seen ||
+                 stop.load(memory_order_acquire);
+        });
+        parked.fetch_sub(1);
+      }
+      spins = 0;
+    }
+  }
+
+  void run(const Part *ps, int np, const int8_t *xq, int32_t *acc_, int in_d,
+           int cols, float qs, float *reduce_out = nullptr,
+           int reduce_width = 0) {
+    uint64_t e = seq.load(memory_order_relaxed) + 1;
+    Slot &S = slots[e & 1];
+    // Commit order is the safety invariant: tag first, then the fields the
+    // tag vouches for, then `next` (release) which arms the job.
+    uint32_t tag = (uint32_t)e;
+    S.tag.store(tag, memory_order_relaxed);
+    for (int p = 0; p < np; ++p)
+      S.parts[p] = ps[p];
+    S.nparts = np;
+    S.x_q = xq;
+    S.acc = acc_;
+    S.in_dim = in_d;
+    S.total_cols = cols;
+    S.quant_scale = qs;
+    S.reduce_out = reduce_out;
+    S.reduce_width = reduce_width;
+    S.nchunks = (cols + CHUNK - 1) / CHUNK;
+    S.chunks_done.store(0, memory_order_relaxed);
+    S.next.store(((uint64_t)tag << 20), memory_order_release); // commit
+    seq.store(e, memory_order_release);                        // wake hint
+    if (parked.load() > 0) {
+      lock_guard<mutex> lk(mtx);
+      cv.notify_all();
+    }
+    drain(S); // caller works too
+    int spins = 0;
+    while (S.chunks_done.load(memory_order_acquire) != S.nchunks) {
+      if (++spins > SPIN_ITERS)
+        this_thread::yield();
+    }
+    // Input-dim-split jobs end in partial acc regions, one per part; the
+    // integer reduce is exact, then the usual dequant per element.
+    if (S.reduce_out != nullptr) {
+      int width = S.reduce_width;
+      for (int j = 0; j < width; ++j) {
+        int32_t s = 0;
+        for (int k = 0; k < np; ++k)
+          s += S.acc[k * width + j];
+        S.reduce_out[j] = ((float)s / qs) * S.parts[0].w_scale;
+      }
+    }
+  }
+};
+
+// Set in main() when --threads > 1; bit_linear checks one pointer per call.
+static LinearPool *g_pool = nullptr;
+static LinearPool g_linear_pool;
+
+// Column-count gate used when the pool is absent (never taken in that case;
+// kept so the gate expression stays readable).
+static constexpr int POOL_MIN_COLS = 512;
+
+// BitLinear input quantization: in-procedure RMSNorm + absmax int8.
+// x_q and quant_scale are pure functions of x -- callers that share an input
+// (Q/K/V) may compute this once and reuse it bit-for-bit.
+static int8_t *quantize_input(const vector<float> &x, int in_dim,
+                              vector<int8_t> &scratch, float *quant_scale) {
   // 0. Internal RMSNorm (Non-affine)
   // Per BitNet paper/impl: BitLinear(x) = Layernorm(x) ...
   // guirguispierre 2026-08-10 - double for the same reason as rms_norm
@@ -103,7 +366,7 @@ void bit_linear(const vector<float> &x, const TensorI8 &w, vector<float> &out,
   if (max_val < 1e-5f)
     max_val = 1e-5f;
 
-  float quant_scale = 127.0f / max_val;
+  *quant_scale = 127.0f / max_val;
 
   // guirguispierre 2026-08-10 - divide before scaling to match
   // activation_quant(); folding it into one multiply rounds differently
@@ -113,23 +376,26 @@ void bit_linear(const vector<float> &x, const TensorI8 &w, vector<float> &out,
     scratch.resize(in_dim);
   int8_t *x_q = scratch.data();
   for (int i = 0; i < in_dim; ++i) {
-    float val = round((x[i] / rms) * quant_scale);
+    float val = round((x[i] / rms) * *quant_scale);
     if (val > 127)
       val = 127;
     if (val < -127)
       val = -127;
     x_q[i] = (int8_t)val;
   }
+  return x_q;
+}
 
-  // 2. Ternary Kernel
+// Serial ternary kernel + dequantize for one output tensor: the exact same
+// arithmetic the pool's per-claim path applies to a column range.
+static void bit_kernel_serial(const int8_t *x_q, const TensorI8 &w,
+                              int32_t *acc, float *out, int in_dim, int out_dim,
+                              float quant_scale) {
+  memset(acc, 0, out_dim * sizeof(int32_t));
+
   // guirguispierre 2026-08-10 - i-outer streams each weight row contiguously
   // instead of striding by out_dim, worth ~14x; integer sums are associative so
   // the totals are unchanged
-  if ((int)acc32.size() < out_dim)
-    acc32.resize(out_dim);
-  int32_t *acc = acc32.data();
-  memset(acc, 0, out_dim * sizeof(int32_t));
-
   for (int i = 0; i < in_dim; ++i) {
     int32_t xv = x_q[i];
     if (xv == 0)
@@ -141,10 +407,103 @@ void bit_linear(const vector<float> &x, const TensorI8 &w, vector<float> &out,
       acc[j] += wrow[j] * xv;
   }
 
-  // 3. Dequantize
   // out = (acc / x_scale) * w_scale
   for (int j = 0; j < out_dim; ++j)
     out[j] = ((float)acc[j] / quant_scale) * w.scale;
+}
+
+// 128B-aligned int32 scratch: with --threads, neighboring column claims never
+// share a cache line, so workers can't ping-pong acc lines per row.
+static int32_t *aligned_acc(vector<int32_t> &acc32, int cols) {
+  if ((int)acc32.size() < cols + 32)
+    acc32.resize(cols + 32);
+  return (int32_t *)(((uintptr_t)acc32.data() + 127) & ~(uintptr_t)127);
+}
+
+// Global Matmul for BitLinear
+// A: Float input [Dim]
+// Weight: Int8 [In, Out]
+// Out: Float output [Out]
+// Scratch: [In] (Pre-allocated buffer to avoid malloc)
+void bit_linear(const vector<float> &x, const TensorI8 &w, vector<float> &out,
+                vector<int8_t> &scratch, vector<int32_t> &acc32) {
+  int in_dim = w.rows;
+  int out_dim = w.cols;
+
+  float quant_scale;
+  int8_t *x_q = quantize_input(x, in_dim, scratch, &quant_scale);
+
+  if ((int)acc32.size() < out_dim + 32)
+    acc32.resize(out_dim + 32);
+  int32_t *acc = aligned_acc(acc32, out_dim);
+
+  // Parallel path: split [0, out_dim) into CHUNK-column pieces claimed off an
+  // atomic counter. Bit-identical to the serial kernel -- every acc[j] is the
+  // same independent int32 sum over all i (see LinearPool).
+  int min_cols = g_pool != nullptr ? g_pool->min_cols : POOL_MIN_COLS;
+  if (g_pool != nullptr && out_dim >= min_cols) {
+    LinearPool::Part p{w.data.data(), out.data(), w.scale, out_dim, 0, 0,
+                       in_dim};
+    g_pool->run(&p, 1, x_q, acc, in_dim, out_dim, quant_scale);
+    return;
+  }
+
+  // Narrow output but fat input (e.g. fc2): split the INPUT dim instead.
+  // Each part accumulates a partial int32 sum over its i-range into its own
+  // acc region; the caller reduces after the join. Integer partial sums are
+  // exact, so still bit-identical to the serial kernel.
+  if (g_pool != nullptr && g_pool->in_split_ok && in_dim >= 512 &&
+      (int64_t)in_dim * out_dim >= 131072 && out_dim >= 32) {
+    int K = g_pool->nthreads;
+    if (K > LinearPool::MAX_PARTS)
+      K = LinearPool::MAX_PARTS;
+    int inlen = in_dim / K;
+    acc = aligned_acc(acc32, K * out_dim);
+    LinearPool::Part ps[LinearPool::MAX_PARTS];
+    for (int k = 0; k < K; ++k)
+      ps[k] = {w.data.data(), nullptr, w.scale, out_dim, k * out_dim,
+               k * inlen,
+               k == K - 1 ? in_dim - k * inlen : inlen};
+    g_pool->run(ps, K, x_q, acc, in_dim, K * out_dim, quant_scale, out.data(),
+                out_dim);
+    return;
+  }
+
+  bit_kernel_serial(x_q, w, acc, out.data(), in_dim, out_dim, quant_scale);
+}
+
+// Fused triple BitLinear for projections sharing one input (Q/K/V): one
+// quantization, one parallel job of 3*out_dim columns instead of three small
+// ones. Each part writes its own out; identical math to three bit_linear
+// calls because x_q is a pure function of x.
+void bit_linear3(const vector<float> &x, const TensorI8 &w1, const TensorI8 &w2,
+                 const TensorI8 &w3, vector<float> &o1, vector<float> &o2,
+                 vector<float> &o3, vector<int8_t> &scratch,
+                 vector<int32_t> &acc32) {
+  int in_dim = w1.rows;
+  int cols = w1.cols + w2.cols + w3.cols;
+
+  float quant_scale;
+  int8_t *x_q = quantize_input(x, in_dim, scratch, &quant_scale);
+  int32_t *acc = aligned_acc(acc32, cols);
+
+  if (g_pool != nullptr && cols >= g_pool->min_cols) {
+    LinearPool::Part ps[3] = {
+        {w1.data.data(), o1.data(), w1.scale, w1.cols, 0, 0, in_dim},
+        {w2.data.data(), o2.data(), w2.scale, w2.cols, w1.cols, 0, in_dim},
+        {w3.data.data(), o3.data(), w3.scale, w3.cols, w1.cols + w2.cols, 0,
+         in_dim}};
+    g_pool->run(ps, 3, x_q, acc, in_dim, cols, quant_scale);
+    return;
+  }
+
+  int col0 = 0;
+  for (const TensorI8 *pw : {&w1, &w2, &w3}) {
+    vector<float> *po = pw == &w1 ? &o1 : pw == &w2 ? &o2 : &o3;
+    bit_kernel_serial(x_q, *pw, acc + col0, po->data(), in_dim, pw->cols,
+                      quant_scale);
+    col0 += pw->cols;
+  }
 }
 
 // guirguispierre 2026-08-10 - full float32 precision so tools/parity_check.py
@@ -203,20 +562,20 @@ bool load_model(const char *filename, AtomicModel &model) {
     return false;
   }
 
-  cout << "Sizeof(Config): " << sizeof(Config) << " (Expected 24)" << endl;
+  cerr << "Sizeof(Config): " << sizeof(Config) << " (Expected 24)" << endl;
   f.read((char *)&model.config, sizeof(Config));
   Config &c = model.config;
 
   cout << "Loaded Config: Dim=" << c.dim << " Layers=" << c.depth
        << " Heads=" << c.heads << " HasGist=" << c.has_gist << endl;
-  cout << "  File Pos after Config: " << f.tellg() << endl;
+  cerr << "  File Pos after Config: " << f.tellg() << endl;
 
   // Read Gist if present
   if (c.has_gist) {
     model.gist_vector.resize(c.dim);
     f.read((char *)model.gist_vector.data(), c.dim * sizeof(float));
   }
-  cout << "  File Pos after Gist: " << f.tellg() << endl;
+  cerr << "  File Pos after Gist: " << f.tellg() << endl;
 
   // Helper
   auto read_f32 = [&](TensorF32 &t, int r, int c_dim) {
@@ -225,7 +584,7 @@ bool load_model(const char *filename, AtomicModel &model) {
     t.data.resize(r * c_dim);
     size_t bytes = t.data.size() * sizeof(float);
     f.read((char *)t.data.data(), bytes);
-    cout << "  Read F32 (" << r << "x" << c_dim << ") Bytes: " << bytes
+    cerr << "  Read F32 (" << r << "x" << c_dim << ") Bytes: " << bytes
          << " Pos: " << f.tellg() << endl;
   };
 
@@ -245,7 +604,7 @@ bool load_model(const char *filename, AtomicModel &model) {
     for (size_t i = 0; i < n; ++i)
       t.data[i] = (int8_t)((packed[i >> 2] >> (2 * (i & 3))) & 3) - 1;
 
-    cout << "    Read I8 (" << r << "x" << c_dim << ") Bytes: " << bytes
+    cerr << "    Read I8 (" << r << "x" << c_dim << ") Bytes: " << bytes
          << " Pos: " << f.tellg() << endl;
   };
 
@@ -269,7 +628,7 @@ bool load_model(const char *filename, AtomicModel &model) {
     } else {
       f.read((char *)t.data.data(), t.data.size() * sizeof(float));
     }
-    cout << "  Read EMB (" << r << "x" << c_dim << ") v" << version
+    cerr << "  Read EMB (" << r << "x" << c_dim << ") v" << version
          << " Pos: " << f.tellg() << endl;
   };
 
@@ -280,7 +639,7 @@ bool load_model(const char *filename, AtomicModel &model) {
   // Layers
   model.layers.resize(c.depth);
   for (int i = 0; i < c.depth; ++i) {
-    cout << "Loading Layer " << i << "..." << endl;
+    cerr << "Loading Layer " << i << "..." << endl;
     read_f32(model.layers[i].ln1, 1, c.dim);
 
     read_i8(model.layers[i].q_w, c.dim, c.dim);
@@ -431,9 +790,8 @@ void forward(AtomicModel &model, const vector<int> &tokens,
     for (int t = 0; t < seq_len; ++t) {
       memcpy(ws.xt.data(), &ws.X_norm[t * dim], dim * sizeof(float));
 
-      bit_linear(ws.xt, layer.q_w, ws.q, ws.scratch_q, ws.acc32);
-      bit_linear(ws.xt, layer.k_w, ws.k, ws.scratch_q, ws.acc32);
-      bit_linear(ws.xt, layer.v_w, ws.v, ws.scratch_q, ws.acc32);
+      bit_linear3(ws.xt, layer.q_w, layer.k_w, layer.v_w, ws.q, ws.k, ws.v,
+                  ws.scratch_q, ws.acc32);
 
       memcpy(&ws.Q[t * dim], ws.q.data(), dim * sizeof(float));
       memcpy(&ws.K[t * dim], ws.k.data(), dim * sizeof(float));
@@ -565,9 +923,8 @@ void forward_one(AtomicModel &model, int token_id, int pos,
     memcpy(ws.xt.data(), x, dim * sizeof(float));
     rms_norm(ws.xt, layer.ln1.data, ws.xn, dim);
 
-    bit_linear(ws.xn, layer.q_w, ws.q, ws.scratch_q, ws.acc32);
-    bit_linear(ws.xn, layer.k_w, ws.k, ws.scratch_q, ws.acc32);
-    bit_linear(ws.xn, layer.v_w, ws.v, ws.scratch_q, ws.acc32);
+    bit_linear3(ws.xn, layer.q_w, layer.k_w, layer.v_w, ws.q, ws.k, ws.v,
+                ws.scratch_q, ws.acc32);
 
     memcpy(cache.k_row(l_idx, pos), ws.k.data(), dim * sizeof(float));
     memcpy(cache.v_row(l_idx, pos), ws.v.data(), dim * sizeof(float));
@@ -725,6 +1082,47 @@ int sample_logits(const vector<float> &logits, float temp, int top_k,
 // Debug Utils (Moved to top)
 
 // Parse "1,2,3,4" -> [1, 2, 3, 4]. Empty string => empty vector.
+// Optional detokenizer: a .vocab file holds one line per token id, each line
+// the lowercase hex of that token's raw bytes (empty line = empty token).
+// Produced by tools/make_vocab.py. Printing raw bytes keeps multi-byte utf-8
+// sequences intact across token boundaries.
+static bool load_vocab(const char *path, vector<string> &vocab) {
+  ifstream f(path);
+  if (!f)
+    return false;
+  string line;
+  while (getline(f, line)) {
+    if (!line.empty() && line.back() == '\r')
+      line.pop_back();
+    if (line.size() % 2 != 0)
+      return false;
+    string bytes;
+    bytes.reserve(line.size() / 2);
+    for (size_t i = 0; i + 1 < line.size(); i += 2) {
+      auto nyb = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+      };
+      int hi = nyb(line[i]), lo = nyb(line[i + 1]);
+      if (hi < 0 || lo < 0)
+        return false;
+      bytes.push_back((char)((hi << 4) | lo));
+    }
+    vocab.push_back(bytes);
+  }
+  return !vocab.empty();
+}
+
+static void print_token(int t, const vector<string> &vocab) {
+  if (t >= 0 && t < (int)vocab.size()) {
+    cout << vocab[t];
+  } else {
+    cout << t << " ";
+  }
+}
+
 static vector<int> parse_token_list(const string &s) {
   vector<int> out;
   if (s.empty())
@@ -758,6 +1156,11 @@ static void print_help() {
        << "  --seed N             RNG seed (default 42)\n"
        << "  --start_token N      Single starting token id (default 42)\n"
        << "  --prompt 1,2,3       Comma-separated starting token ids (overrides --start_token)\n"
+       << "  --vocab PATH         .vocab file (hex-per-line, tools/make_vocab.py) to print text instead of ids\n"
+       << "  --threads N          Worker threads for the ternary matmuls\n"
+       << "                       (default: min(8, hardware_concurrency); 1 = exact serial path).\n"
+       << "                       Splits each projection's column dim across a persistent\n"
+       << "                       pool; output is bit-identical for any N.\n"
        << "  --stream             Print tokens as they are generated (default on)\n"
        << "  --no-stream          Buffer all tokens and print at end\n"
        << "  --parity             Run a single-step parity check\n"
@@ -773,31 +1176,54 @@ int main(int argc, char **argv) {
   float top_p = 0.0f;
   int seed = 42;
   int start_token = 42;
+  int threads = 0; // 0 = default, resolved after parsing
   bool parity_mode = false;
   bool stream = true;
+  string vocab_path;
+
+  auto need_value = [&](int i, const string &arg) -> bool {
+    if (i + 1 < argc)
+      return true;
+    cerr << "Error: " << arg << " requires a value (use --help)" << endl;
+    return false;
+  };
 
   for (int i = 1; i < argc; ++i) {
     string arg = argv[i];
     if (arg == "--help" || arg == "-h") {
       print_help();
       return 0;
-    } else if (arg == "--model" && i + 1 < argc)
+    } else if (arg == "--model") {
+      if (!need_value(i, arg)) return 2;
       model_path = argv[++i];
-    else if (arg == "--steps" && i + 1 < argc)
+    } else if (arg == "--steps") {
+      if (!need_value(i, arg)) return 2;
       gen_len = atoi(argv[++i]);
-    else if (arg == "--temp" && i + 1 < argc)
+    } else if (arg == "--temp") {
+      if (!need_value(i, arg)) return 2;
       temp = (float)atof(argv[++i]);
-    else if (arg == "--top_k" && i + 1 < argc)
+    } else if (arg == "--top_k") {
+      if (!need_value(i, arg)) return 2;
       top_k = atoi(argv[++i]);
-    else if (arg == "--top_p" && i + 1 < argc)
+    } else if (arg == "--top_p") {
+      if (!need_value(i, arg)) return 2;
       top_p = (float)atof(argv[++i]);
-    else if (arg == "--seed" && i + 1 < argc)
+    } else if (arg == "--seed") {
+      if (!need_value(i, arg)) return 2;
       seed = atoi(argv[++i]);
-    else if (arg == "--start_token" && i + 1 < argc)
+    } else if (arg == "--start_token") {
+      if (!need_value(i, arg)) return 2;
       start_token = atoi(argv[++i]);
-    else if (arg == "--prompt" && i + 1 < argc)
+    } else if (arg == "--prompt") {
+      if (!need_value(i, arg)) return 2;
       prompt_str = argv[++i];
-    else if (arg == "--stream")
+    } else if (arg == "--vocab") {
+      if (!need_value(i, arg)) return 2;
+      vocab_path = argv[++i];
+    } else if (arg == "--threads") {
+      if (!need_value(i, arg)) return 2;
+      threads = atoi(argv[++i]);
+    } else if (arg == "--stream")
       stream = true;
     else if (arg == "--no-stream")
       stream = false;
@@ -806,6 +1232,29 @@ int main(int argc, char **argv) {
     else {
       cerr << "Unknown arg: " << arg << " (use --help)" << endl;
       return 2;
+    }
+  }
+
+  {
+    int hw = (int)thread::hardware_concurrency();
+    if (hw < 1)
+      hw = 1;
+    if (threads == 0) {
+      // Default: measured best around 6-8 on an M5 Pro (6P+12E) and ~neutral
+      // on tiny models; output is bit-identical either way. --threads 1
+      // forces the exact serial path.
+      threads = min(8, hw);
+    } else if (threads > hw) {
+      cerr << "Warning: --threads " << threads
+           << " exceeds hardware_concurrency " << hw << ", clamping" << endl;
+      threads = hw;
+    } else if (threads < 1) {
+      cerr << "Warning: --threads " << threads << " invalid, using 1" << endl;
+      threads = 1;
+    }
+    if (threads > 1) {
+      g_linear_pool.start(threads);
+      g_pool = &g_linear_pool;
     }
   }
 
@@ -831,6 +1280,12 @@ int main(int argc, char **argv) {
   if (context.empty())
     context.push_back(start_token);
 
+  vector<string> vocab;
+  if (!vocab_path.empty() && !load_vocab(vocab_path.c_str(), vocab)) {
+    cerr << "Error: could not load vocab file " << vocab_path << endl;
+    return 1;
+  }
+
   for (int t : context) {
     if (t < 0 || t >= model.config.vocab_size) {
       cerr << "Error: prompt token " << t << " out of vocab range [0, "
@@ -840,11 +1295,18 @@ int main(int argc, char **argv) {
   }
 
   if (stream) {
-    cout << "Generating: ";
+    if (vocab.empty())
+      cout << "Generating: ";
     for (int t : context)
-      cout << t << " ";
+      print_token(t, vocab);
+    if (vocab.empty())
+      cout << " ";
+    else
+      cout << "\n";
     cout.flush();
   }
+  if (parity_mode)
+    cout << endl; // keep the first probe off the prompt-echo line
 
   Workspace ws;
   ws.ensure_size(model.config.max_seq_len, model.config.dim);
@@ -856,13 +1318,21 @@ int main(int argc, char **argv) {
   vector<int> generated;
   auto start_time = std::chrono::high_resolution_clock::now();
 
+  // A gist occupies one context row, so only this many token slots remain.
+  int ctx_cap = model.config.max_seq_len - t_offset;
+
   for (int step = 0; step < gen_len; ++step) {
-    if ((int)context.size() > model.config.max_seq_len) {
-      context.erase(context.begin(),
-                    context.begin() +
-                        ((int)context.size() - model.config.max_seq_len));
-      // Sliding the window rebases every learned position embedding, so the
-      // cached K/V rows are stale: refill from scratch this step.
+    if ((int)context.size() > ctx_cap) {
+      // Keep ~3/4 of the window: the slide rebases every learned position so
+      // the cache must be refilled anyway, and erasing a chunk leaves headroom
+      // for several cached decode steps before the next rebuild.
+      int keep = ctx_cap - ctx_cap / 4;
+      if (keep < 1)
+        keep = 1;
+      int erase_count = (int)context.size() - keep;
+      if (erase_count < 1)
+        erase_count = 1;
+      context.erase(context.begin(), context.begin() + erase_count);
       cache.len = -1;
     }
 
@@ -876,15 +1346,18 @@ int main(int argc, char **argv) {
         forward(model, context, logits, ws, cache, parity_mode);
       }
     } else {
-      // Same bound as forward()'s early return: nothing to run, logits stay
-      // zeroed (reached only with a gist, when tokens fill the whole window).
+      // Defensive: unreachable after the ctx_cap slide above, but keep the
+      // guard so a future edit can't turn an overflow into silent zero logits.
       cache.len = -1;
     }
     int next_token = sample_logits(logits, temp, top_k, top_p, rng);
     generated.push_back(next_token);
     context.push_back(next_token);
     if (stream) {
-      cout << next_token << " " << flush;
+      if (vocab.empty())
+        cout << next_token << " " << flush;
+      else
+        print_token(next_token, vocab);
     }
   }
 
@@ -893,9 +1366,10 @@ int main(int argc, char **argv) {
   double tps = gen_len / diff.count();
 
   if (!stream) {
-    cout << "Generated: ";
+    if (vocab.empty())
+      cout << "Generated: ";
     for (int t : generated)
-      cout << t << " ";
+      print_token(t, vocab);
   }
 
   cout << endl << "Done." << endl;

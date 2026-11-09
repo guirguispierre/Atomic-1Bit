@@ -42,6 +42,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   kernel parity test for odd tail dimensions.
 - `tools/train_fixture_checkpoint.py` -- the script that produced the
   checked-in checkpoint, with an offline fallback corpus.
+- **KV cache in `atomic_lib.h` too**: `KVCache` plus `forward_one()` give
+  the header-only API the same per-token decode the runner has, with
+  bit-identical logits to a full `forward()` (verified by a compiled
+  harness in `tests/test_cached_decode.py`).
+- **`--vocab` detokenizer output in the runner**: `tools/make_vocab.py`
+  emits a hex-per-line `.vocab` file (shipped for the checkpoint as
+  `checkpoints/tiny_stories.vocab`) and the runner decodes generated
+  token ids to text when it is passed.
+- **WASM port verified end to end**: built with Emscripten and driven
+  from Node, it emits the identical greedy token stream the native
+  runner produces on the same model.
+- **`--threads N` in the runner**: a persistent worker pool splits each
+  ternary matmul's output columns (and fused Q/K/V as one job) with
+  dynamic claiming, so heterogeneous P/E cores both stay busy. Every
+  output accumulator is an independent int32 sum, so output is
+  bit-identical for any thread count -- verified byte-for-byte across
+  13 decode configs. ~5.3-5.6k TPS at 4-8 threads vs ~3.3k serial on
+  the Quick Start config; `--threads 1` keeps the serial path.
+- `tests/test_runner_cli.py` locks 27 CLI behaviors (determinism,
+  context-crossing slides, `--parity`, `--vocab`, arg validation, gist
+  exports), and the Python sources are flake8/black/isort clean.
 
 ### Fixed
 - **Metal backend**: `default.metallib` was located via compile-time
@@ -60,6 +81,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unpacked weights) and could not load any export the tool produces.
 - ESP32 PlatformIO project: source moved to `src/main.cpp` so `pio run`
   builds it; verified compiling for `esp32dev` (22.5 KB RAM, 318 KB flash).
+- **Gist position parity**: the PyTorch model indexed prompt tokens from 0
+  even when a gist occupied stream slot 0, while its own decode path (and
+  the C++ engine) used stream indices -- prefill and decode disagreed by
+  one position. PyTorch and `atomic_lib.h` now use stream indices
+  throughout; a v2-export parity test locks it near machine precision.
+- **Gist models stopped dead-generating past the context window**: the
+  slide cap ignored the gist row, so a full window produced zeroed logits
+  and uniform sampling forever. The cap is now `max_seq_len - 1` under a
+  gist, and the slide erases a quarter-window chunk so the cache survives
+  between rebuilds.
+- `.vocab` files with malformed lines now fail to load instead of
+  silently decoding garbage; a trailing value flag reports
+  `requires a value` rather than `Unknown arg`.
 
 ## [1.5.0] - 2026-08-10
 

@@ -1,5 +1,4 @@
 import torch
-import torch.nn.functional as F
 
 
 def sentence_completion_accuracy(model, dataset, vocab_size, device, num_samples=50):

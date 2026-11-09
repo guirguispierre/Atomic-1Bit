@@ -123,16 +123,27 @@ g++ -O3 -std=c++17 atomic_runner.cpp -o runner
   - `--start_token`: Single initial token ID (e.g., 58 for "Once").
   - `--prompt 1,2,3`: Comma-separated starting token IDs (overrides `--start_token`).
   - `--stream` / `--no-stream`: Stream tokens as generated (default on) vs. buffer until end.
+  - `--vocab`: Path to a `.vocab` detokenizer file (hex per line, made by `tools/make_vocab.py`) to print decoded text instead of token ids. `checkpoints/tiny_stories.vocab` ships for the fixture checkpoint.
+  - `--threads N`: Worker threads for the ternary matmuls (default: `min(8, hardware_concurrency)`). A persistent pool splits each projection's output columns; output is bit-identical for any N. `1` = exact serial path. Values above `hardware_concurrency` are clamped with a warning.
   - `--parity`: Print per-layer activation dumps and final logits for one step (no comparison by itself).
   - `--help`: Show all flags.
 
+**Text output example** (fixture checkpoint -> real words out of the C++ engine):
+```bash
+python3 atomic_1bit/utils/export_to_cpp.py --model checkpoints/tiny_stories.pt \
+  --output /tmp/tiny.bin --dim 128 --depth 4 --heads 4 --vocab_size 2048 --context_len 64
+./runner --model /tmp/tiny.bin --steps 80 --temp 0.8 --seed 7 --start_token 1 \
+  --vocab ../checkpoints/tiny_stories.vocab
+```
+
 ### Step 3: Numeric Parity Check
-Compares the C++ runner's `--parity` dump against the PyTorch forward pass, probe by probe. Exports the `.bin` itself unless `--bin` is given; exits nonzero if any probe exceeds tolerance.
+Compares the C++ runner's `--parity` dump against the PyTorch forward pass, probe by probe. Exports the `.bin` itself unless `--bin` points at an existing file; exits nonzero on a probe marked FAIL.
 
 ```bash
 python3 tools/parity_check.py                     # checked-in fixture checkpoint
 python3 tools/parity_check.py --checkpoint weights/stories_final.pt \
   --dim 256 --depth 6 --heads 4 --vocab-size 4096 --ctx 128
+python3 tools/parity_check.py --gist /path/to/gist.f32   # include the gist path
 ```
 
 - **Flags**:
@@ -140,9 +151,10 @@ python3 tools/parity_check.py --checkpoint weights/stories_final.pt \
   - `--runner`: runner binary (default: `embedded/runner`).
   - `--bin`: reuse an existing export instead of exporting to a temp file.
   - `--prompt 12,34,56` / `--start-token N`: probe input (multi-token exercises attention across positions).
-  - `--tolerance`: max relative error per probe (default `5e-2`; see README "Numerical parity" for why the int8 quantizer makes last-ULP strictness meaningless).
+  - `--gist`: raw `float32[dim]` file embedded into the export so attention over the gist row is parity-checked too.
+  - `--tolerance`: max relative error per probe (default `5e-2`; see README "Numerical parity" for why the int8 quantizer makes last-ULP strictness meaningless). A probe 1-4x over tolerance reports `WARN` (plausible quantization boundary excursion -- the gist path amplifies embedding noise) without failing; only `FAIL` rows exit nonzero.
   - `--dim/--depth/--heads/--vocab-size/--ctx`: required only when the checkpoint stores no `config` dict.
-- **Exit codes**: `0` PASS, `1` numeric FAIL, `2` setup error.
+- **Exit codes**: `0` PASS (WARNs allowed), `1` numeric FAIL, `2` setup error.
 
 ---
 
